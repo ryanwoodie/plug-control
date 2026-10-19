@@ -50,12 +50,16 @@ guard keeps a runaway well inside the 500 MB.
    `secrets/credentials.txt`, both git-ignored):
 
    ```bash
-   tools/make_secrets.py --owner owner1 --owner owner2 \
-     --plug "ACEBE6F17B6C:owner1:Plug A" --plug "ACEBE6F17C50:owner2:Plug B"
+   tools/make_secrets.py --owner C-GMEH --owner C-FTBV \
+     --plug "ACEBE6F17B6C:C-GMEH:C-GMEH plug" --plug "ACEBE6F17C50:C-FTBV:C-FTBV plug"
    ```
 
-   Add `--password owner1=...` to choose a password instead of a random one.
+   Add `--password C-GMEH=...` to choose a password instead of a random one.
    Changing passwords or plug ownership means re-running this and reflashing.
+   The board's Wi-Fi credentials are kept, so plugs stay connected; saved
+   schedules reset because they belonged to the old logins. Afterwards run
+   `tools/clear_topics.py secrets/secrets.prev.h` to delete the old logins'
+   messages from the broker.
 
 2. Flash: `cd firmware && pio run -t upload`.
 

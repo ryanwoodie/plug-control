@@ -412,6 +412,15 @@ void setup() {
   delay(200);
   Serial.printf("\n[boot] plug controller %s\n", FW_VERSION);
   prefs.begin("app");
+  // New owner keys (make_secrets.py re-run): saved settings belong to the old
+  // logins, so start fresh and re-apply plug names. The data meter is kept.
+  String keyId;
+  for (uint8_t i = 0; i < OWNER_COUNT; i++) keyId += OWNERS[i].tid;
+  if (prefs.getString("keyid", "") != keyId) {
+    prefs.clear();
+    prefs.putString("keyid", keyId);
+    Serial.println("[boot] owner keys changed, settings reset");
+  }
 
   pinMode(GPS_WAKE_PIN, OUTPUT);
   digitalWrite(GPS_WAKE_PIN, HIGH);

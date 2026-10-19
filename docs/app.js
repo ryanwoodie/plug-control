@@ -360,7 +360,7 @@ async function start(s) {
   $('login').hidden = true;
   $('app').hidden = false;
   $('who').hidden = false;
-  $('whoName').textContent = s.user;
+  $('whoName').textContent = s.user.toUpperCase();
   render();
   connect();
 }

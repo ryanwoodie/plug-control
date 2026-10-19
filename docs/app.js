@@ -198,6 +198,8 @@ function render() {
 function plugCard(mac, s, pc) {
   const pend = pendingFor(mac);
   const stateCls = !s.ok ? 'unknown' : s.on ? 'on' : 'off';
+  // Highlight the button matching the reported state; neither when unknown.
+  const isOn = !!(status && s.ok && s.on), isOff = !!(status && s.ok && !s.on);
   const stateTxt = !status ? '—' : !s.ok ? 'Unreachable' : s.on ? 'On' : 'Off';
   const timer = s.on && s.te > nowS() ? `<span class="pill">off at ${fmtTime(s.te)}</span>` : '';
   const via = s.ok && SRC[s.s] ? `<span class="muted small">${s.on ? 'turned on' : 'turned off'} ${SRC[s.s]}</span>` : '';
@@ -224,8 +226,8 @@ function plugCard(mac, s, pc) {
     ${s.ok ? `<p class="meter"><span>${(s.w ?? 0).toFixed(1)} W</span><span>${s.v ?? '–'} V</span><span>${(s.kwh ?? 0).toFixed(3)} kWh total</span></p>` : ''}
     ${pendTxt}
     <div class="actions">
-      <button class="primary" data-act="on" data-mac="${mac}">On</button>
-      <button data-act="off" data-mac="${mac}">Off</button>
+      <button class="${isOn ? 'sel-on' : ''}" aria-pressed="${isOn}" data-act="on" data-mac="${mac}">On</button>
+      <button class="${isOff ? 'sel-off' : ''}" aria-pressed="${isOff}" data-act="off" data-mac="${mac}">Off</button>
       <button data-act="timer" data-mac="${mac}">Timer…</button>
     </div>
     <h3>Schedules</h3>

@@ -11,6 +11,7 @@
   --warn-bg: #fff7e6;
   --warn-line: #f5c26b;
   --danger: #c2410c;
+  --sel-off: #e4e7ec;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -26,12 +27,13 @@
     --warn-bg: #2b2414;
     --warn-line: #8a6a1f;
     --danger: #f97316;
+    --sel-off: #2c313a;
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --bg: #111317; --card: #1a1d23; --text: #e6e8ec; --muted: #98a2b3; --line: #2c313a;
-  --accent: #3b82f6; --on: #22c55e; --off: #667085; --warn-bg: #2b2414; --warn-line: #8a6a1f; --danger: #f97316;
+  --accent: #3b82f6; --on: #22c55e; --off: #667085; --warn-bg: #2b2414; --warn-line: #8a6a1f; --danger: #f97316; --sel-off: #2c313a;
   color-scheme: dark;
 }
 
@@ -79,6 +81,8 @@ button.danger { color: var(--danger); }
 button.link { border: 0; background: none; padding: 4px 0; color: var(--accent); text-align: left; }
 button.link.danger { color: var(--danger); }
 button:disabled { opacity: .6; cursor: default; }
+button.sel-on { background: var(--on); border-color: var(--on); color: #fff; font-weight: 600; }
+button.sel-off { background: var(--sel-off); border-color: var(--muted); font-weight: 600; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .actions button { flex: 1 1 90px; }
 

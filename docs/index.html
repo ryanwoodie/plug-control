@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Plug Control</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%232563eb' d='M7 2v6H5v5a7 7 0 0 0 6 6.9V22h2v-2.1A7 7 0 0 0 19 13V8h-2V2h-2v6H9V2z'/></svg>">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Plug Control</h1>
+    <div id="who" hidden><span id="whoName"></span> <button class="link" id="logout">Sign out</button></div>
+  </header>
+
+  <main>
+    <section id="login" class="card narrow">
+      <h2>Sign in</h2>
+      <form id="loginForm">
+        <label>Username <input id="user" autocomplete="username" autocapitalize="none" required></label>
+        <label>Password <input id="pass" type="password" autocomplete="current-password" required></label>
+        <label class="check"><input id="remember" type="checkbox" checked> Keep me signed in on this device</label>
+        <button class="primary" id="loginBtn">Sign in</button>
+        <p class="error" id="loginErr" hidden></p>
+      </form>
+    </section>
+
+    <section id="app" hidden>
+      <div id="banner" class="banner" hidden></div>
+      <div id="plugs"></div>
+      <section class="card" id="device">
+        <div class="row between">
+          <h2>Controller</h2>
+          <button id="refresh">Refresh status</button>
+        </div>
+        <dl id="devInfo"></dl>
+        <details>
+          <summary>Settings</summary>
+          <label>Site time zone
+            <select id="tz"></select>
+          </label>
+          <button id="saveTz">Save time zone</button>
+        </details>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="ruleDlg">
+    <form method="dialog" id="ruleForm">
+      <h3 id="ruleTitle">Schedule</h3>
+      <label>Name <input id="ruleName" placeholder="e.g. Weekend preheat" maxlength="24"></label>
+      <fieldset class="days" id="ruleDays"></fieldset>
+      <div class="row">
+        <label>Turn on at <input id="ruleStart" type="time" required></label>
+        <label>Keep on for <select id="ruleDur"></select></label>
+      </div>
+      <label class="check"><input id="ruleEn" type="checkbox" checked> Enabled</label>
+      <div class="row between">
+        <button value="delete" id="ruleDelete" class="danger" formnovalidate>Delete</button>
+        <span><button value="cancel" formnovalidate>Cancel</button> <button value="save" class="primary">Save</button></span>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="onceDlg">
+    <form method="dialog">
+      <h3>One-time</h3>
+      <label>Turn on at <input id="onceAt" type="datetime-local" required></label>
+      <label>Keep on for <select id="onceDur"></select></label>
+      <div class="row between">
+        <span></span>
+        <span><button value="cancel" formnovalidate>Cancel</button> <button value="save" class="primary">Save</button></span>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="plugDlg">
+    <form method="dialog">
+      <h3>Plug settings</h3>
+      <label>Name <input id="plugName" maxlength="24" required></label>
+      <label>Auto-off for manual "On"
+        <select id="plugMax"></select>
+      </label>
+      <p class="hint">A safety limit: manual "On" turns itself off after this long. Schedules and timers set their own end time.</p>
+      <div class="row between">
+        <span></span>
+        <span><button value="cancel" formnovalidate>Cancel</button> <button value="save" class="primary">Save</button></span>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="timerDlg">
+    <form method="dialog">
+      <h3>Timer</h3>
+      <label>Turn on now, then off after <select id="timerDur"></select></label>
+      <div class="row between">
+        <span></span>
+        <span><button value="cancel" formnovalidate>Cancel</button> <button value="save" class="primary">Start</button></span>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

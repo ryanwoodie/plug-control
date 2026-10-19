@@ -23,6 +23,8 @@ static Preferences store;
 // The modem cannot report billed bytes, so we estimate: payload bytes plus
 // ~52 B per IP packet and its ACK, and a fixed cost per TCP connection.
 static uint32_t meterDay = 0, meterMonth = 0, lastMeterSave = 0;
+// Breakdown since boot, for the serial log.
+static uint32_t dbgConn, dbgTx, dbgRx, dbgOvh, dbgReconnects, dbgPub, dbgRecv;
 
 static void meterAdd(uint32_t n) {
   xSemaphoreTake(infoLock, portMAX_DELAY);
@@ -63,24 +65,38 @@ static void meterRoll() {
 class MeteredClient : public Client {
  public:
   explicit MeteredClient(Client &c) : c(c) {}
-  int connect(IPAddress ip, uint16_t port) override { meterAdd(400); return c.connect(ip, port); }
-  int connect(const char *host, uint16_t port) override { meterAdd(550); return c.connect(host, port); }
+  int connect(IPAddress ip, uint16_t port) override { meterAdd(400); dbgConn += 400; return c.connect(ip, port); }
+  int connect(const char *host, uint16_t port) override { meterAdd(550); dbgConn += 550; return c.connect(host, port); }
   size_t write(uint8_t b) override { return write(&b, 1); }
-  size_t write(const uint8_t *buf, size_t n) override { meterAdd(n + 104); return c.write(buf, n); }
+  size_t write(const uint8_t *buf, size_t n) override {
+    meterAdd(n + 104);
+    dbgTx += n;
+    dbgOvh += 104;
+    return c.write(buf, n);
+  }
   int available() override {
     int a = c.available();
-    if (a > 0 && !burst) meterAdd(104);
+    if (a > 0 && !burst) {
+      meterAdd(104);
+      dbgOvh += 104;
+    }
     burst = a > 0;
     return a;
   }
   int read() override {
     int r = c.read();
-    if (r >= 0) meterAdd(1);
+    if (r >= 0) {
+      meterAdd(1);
+      dbgRx++;
+    }
     return r;
   }
   int read(uint8_t *buf, size_t n) override {
     int r = c.read(buf, n);
-    if (r > 0) meterAdd(r);
+    if (r > 0) {
+      meterAdd(r);
+      dbgRx += r;
+    }
     return r;
   }
   int peek() override { return c.peek(); }
@@ -105,6 +121,8 @@ static bool modemAlive() {
   return false;
 }
 
+static bool modemWasOn = false;
+
 static bool modemPowerOn() {
   pinMode(BOARD_POWER_ON_PIN, OUTPUT);
   digitalWrite(BOARD_POWER_ON_PIN, HIGH);
@@ -113,7 +131,10 @@ static bool modemPowerOn() {
   pinMode(MODEM_DTR_PIN, OUTPUT);
   digitalWrite(MODEM_DTR_PIN, LOW);
   SerialAT.begin(115200, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
-  if (modemAlive()) return true;  // already on (ESP32 restarted alone)
+  if (modemAlive()) {  // already on (ESP32 restarted alone)
+    modemWasOn = true;
+    return true;
+  }
   pinMode(MODEM_PWRKEY_PIN, OUTPUT);
   digitalWrite(MODEM_PWRKEY_PIN, LOW);
   delay(100);
@@ -170,6 +191,8 @@ static void setOnline(bool v) {
 
 // ---- MQTT ----------------------------------------------------------------
 static void onMessage(char *topic, uint8_t *payload, unsigned int len) {
+  dbgRecv++;
+  Serial.printf("[link] recv %u B on %s\n", len, topic);
   Msg *m = new Msg{String(topic), std::vector<uint8_t>(payload, payload + len)};
   if (xQueueSend(inQ, &m, 0) != pdTRUE) delete m;
 }
@@ -189,6 +212,7 @@ static bool mqttConnect() {
     return false;
   }
   for (auto &t : subs) mqtt.subscribe(t.c_str(), 0);
+  dbgReconnects++;
   Serial.println("[link] mqtt online");
   return true;
 }
@@ -211,6 +235,7 @@ static void linkTask(void *) {
     delay(60000);
   }
   modem.init();
+  if (modemWasOn) modem.gprsDisconnect();  // drop the previous boot's sockets
   modem.sendAT(GF("+CGDCONT=1,\"IP\",\"" APN "\""));
   modem.waitResponse();
   Serial.printf("[link] modem %s\n", modem.getModemName().c_str());
@@ -279,9 +304,17 @@ static void linkTask(void *) {
     }
 
     mqtt.loop();
+    static uint32_t lastDbg = 0;
+    if (millis() - lastDbg > 10 * 60 * 1000UL) {
+      lastDbg = millis();
+      Serial.printf("[meter] today=%u since boot: conn=%u tx=%u rx=%u ovh=%u sessions=%u pub=%u recv=%u\n",
+                    info.today, dbgConn, dbgTx, dbgRx, dbgOvh, dbgReconnects, dbgPub, dbgRecv);
+    }
     Msg *m;
     while (xQueueReceive(outQ, &m, 0) == pdTRUE) {
       mqtt.publish(m->topic.c_str(), m->data.data(), m->data.size(), true);
+      dbgPub++;
+      Serial.printf("[link] sent %u B on %s\n", (unsigned)m->data.size(), m->topic.c_str());
       delete m;
     }
     if (millis() - lastNetInfo > 10 * 60 * 1000UL) {
@@ -314,7 +347,9 @@ void linkBegin(const std::vector<String> &subscribeTopics) {
   info.today = store.getUInt("today");
   info.month = store.getUInt("month");
   info.total = store.getUInt("total");
-  xTaskCreatePinnedToCore(linkTask, "link", 12288, nullptr, 1, nullptr, 0);
+  // Idle priority: TinyGSM busy-waits (up to 75 s on a socket open) and would
+  // otherwise starve IDLE0 and trip the task watchdog.
+  xTaskCreatePinnedToCore(linkTask, "link", 12288, nullptr, tskIDLE_PRIORITY, nullptr, 0);
 }
 
 void linkPublish(const String &topic, std::vector<uint8_t> &&payload) {

@@ -31,7 +31,7 @@ struct Plug {
   std::vector<Rule> rules;
   std::vector<OneOff> ones;
   uint16_t maxOn = 0;  // safety cap for manual "on", minutes (0 = none)
-  bool reachable = false, hardened = false, on = false;
+  bool reachable = false, everSeen = false, hardened = false, on = false;
   float watts = 0, volts = 0, wh = 0;
   uint8_t misses = 0;
   time_t timerEnd = 0;
@@ -40,13 +40,19 @@ struct Plug {
   uint32_t lastCmdMs = 0;
 };
 
+// Report urgency. Urgent changes (on/off, acks) go out in ~3 s; lazy ones
+// (plug reachability, heartbeat) wait 90 s so blips and bursts collapse into
+// one message, and are dropped if nothing visible changed. Force always sends.
+enum : uint8_t { DIRTY_LAZY = 1, DIRTY_URGENT = 2, DIRTY_FORCE = 4 };
+
 struct Owner {
   const OwnerDef *def;
   String topicC, topicX, topicS, tz = "CST6";
   uint64_t cfgVer = 0;  // ms timestamp set by the web app
   std::vector<String> seen;  // recently applied command ids
-  bool dirty = true;
+  uint8_t dirty = DIRTY_FORCE;  // first report ~90 s after boot, once plugs have checked in
   uint32_t dirtyMs = 0;
+  String lastSig;  // state summary of the last report, to skip no-op reports
 };
 
 static Plug plugs[PLUG_COUNT];
@@ -69,9 +75,9 @@ void noteTime(time_t utc, const char *source) {
   timeSource = source;
 }
 
-static void markDirty(uint8_t owner) {
+static void markDirty(uint8_t owner, uint8_t level = DIRTY_URGENT) {
   if (!owners[owner].dirty) owners[owner].dirtyMs = millis();
-  owners[owner].dirty = true;
+  owners[owner].dirty |= level;
 }
 
 // ---- owner config ----------------------------------------------------------
@@ -121,9 +127,9 @@ static bool setPlug(Plug &p, bool on, uint32_t secs, char src) {
 static void pollPlug(Plug &p) {
   ShellyStatus st;
   if (!shellyGetStatus(p.ip, st)) {
-    if (p.reachable && ++p.misses >= 3) {
+    if (p.reachable && ++p.misses >= 8) {  // ~1 min of silence
       p.reachable = false;
-      markDirty(p.def->owner);
+      markDirty(p.def->owner, DIRTY_LAZY);
       Serial.printf("[plug] %s unreachable\n", p.def->mac);
     }
     return;
@@ -131,7 +137,8 @@ static void pollPlug(Plug &p) {
   p.misses = 0;
   if (!p.reachable) {
     p.reachable = true;
-    markDirty(p.def->owner);
+    p.everSeen = true;
+    markDirty(p.def->owner, DIRTY_LAZY);
     Serial.printf("[plug] %s online at %s\n", p.def->mac, p.ip.c_str());
     if (p.prevWant && !st.on && p.src == 's') p.schedPending = true;  // plug lost power mid-window
   }
@@ -205,9 +212,8 @@ static void handleCommands(uint8_t oi, JsonDocument &doc) {
     o.seen.push_back(id);
     if (o.seen.size() > 12) o.seen.erase(o.seen.begin());
     changed = true;
-    markDirty(oi);
-
     String a = c["a"] | "";
+    markDirty(oi, a == "ref" ? DIRTY_URGENT | DIRTY_FORCE : DIRTY_URGENT);
     if (a == "ref") continue;
     long age = timeValid() ? (long)(time(nullptr) - (time_t)(c["t"] | 0u)) : 0;
     if (labs(age) > CMD_MAX_AGE_S) {
@@ -295,19 +301,38 @@ static String buildStatus(uint8_t oi) {
   return out;
 }
 
+// What the web app would show, minus readings that drift (watts, volts, kWh).
+static String stateSignature(uint8_t oi) {
+  String s = String(owners[oi].cfgVer) + "|";
+  if (!owners[oi].seen.empty()) s += owners[oi].seen.back();
+  for (auto &p : plugs) {
+    if (p.def->owner != oi) continue;
+    s += "|" + String(p.def->mac) + (p.reachable ? "1" : "0") + (p.on ? "1" : "0") + p.src + String((uint32_t)p.timerEnd);
+  }
+  return s;
+}
+
 static void reportStatus() {
   static uint32_t lastBeat = 0;
   if (millis() - lastBeat > HEARTBEAT_S * 1000UL) {
     lastBeat = millis();
-    for (uint8_t i = 0; i < OWNER_COUNT; i++) markDirty(i);
+    for (uint8_t i = 0; i < OWNER_COUNT; i++) markDirty(i, DIRTY_LAZY | DIRTY_FORCE);
   }
   if (!linkInfo().online) return;  // stay dirty until the link is up
   for (uint8_t i = 0; i < OWNER_COUNT; i++) {
     Owner &o = owners[i];
-    if (!o.dirty || millis() - o.dirtyMs < 3000) continue;  // coalesce bursts of changes
+    if (!o.dirty) continue;
+    uint32_t wait = (o.dirty & DIRTY_URGENT) ? 3000 : 90000;
+    if (millis() - o.dirtyMs < wait) continue;
+    String sig = stateSignature(i);
+    if (!(o.dirty & DIRTY_FORCE) && sig == o.lastSig) {
+      o.dirty = 0;  // e.g. a plug dropped off Wi-Fi and came back: nothing to tell
+      continue;
+    }
     std::vector<uint8_t> sealed;
     if (sealMsg(o.def->key, o.topicS, buildStatus(i), sealed)) linkPublish(o.topicS, std::move(sealed));
-    o.dirty = false;
+    o.lastSig = sig;
+    o.dirty = 0;
   }
 }
 
@@ -355,12 +380,17 @@ static void readGps() {
 // ---- provisioning of factory-fresh plugs ------------------------------------
 static void provisionMissing() {
   static uint32_t last = 0;
-  uint32_t interval = millis() < 30 * 60 * 1000UL ? 60 * 1000UL : 10 * 60 * 1000UL;
-  if (millis() < 20000 || millis() - last < interval) return;
+  // A scan briefly knocks plugs off our network, so only scan often for plugs
+  // never seen since boot (factory-fresh or reset), and give known plugs 90 s
+  // to rejoin after a reboot first.
+  bool neverSeen = false, missing = false;
+  for (auto &p : plugs) {
+    neverSeen |= !p.everSeen;
+    missing |= !p.reachable;
+  }
+  uint32_t interval = neverSeen ? (millis() < 30 * 60 * 1000UL ? 60 * 1000UL : 10 * 60 * 1000UL) : 30 * 60 * 1000UL;
+  if (!missing || millis() < 90000 || millis() - last < interval) return;
   last = millis();
-  bool missing = false;
-  for (auto &p : plugs) missing |= !p.reachable;
-  if (!missing) return;
 
   int n = WiFi.scanNetworks(false, false, false, 120);
   for (int i = 0; i < n; i++) {

@@ -10,6 +10,7 @@ const BROKER_WS = 'wss://broker.hivemq.com:8884/mqtt';
 const PBKDF2_ITERS = 100000; // must match tools/make_secrets.py
 const CMD_MAX_AGE = 900;     // seconds; matches CMD_MAX_AGE_S in firmware
 const STALE_AFTER = 10 * 60; // auto-refresh if the last status is older than this
+const OFFLINE_AFTER = 6.5 * 3600; // the controller reports at least every 6 h
 
 const TIMEZONES = [
   ['CST6', 'Saskatchewan (CST, no DST)'],
@@ -241,6 +242,10 @@ function plugCard(mac, s, pc) {
 }
 
 function renderDevice() {
+  const off = $('offline');
+  const silent = status && nowS() - status.t > OFFLINE_AFTER;
+  off.hidden = !silent;
+  if (silent) off.textContent = `The controller hasn't reported since ${new Date(status.t * 1000).toLocaleString()}, so it's probably offline (power, cell signal, or its daily data limit). Commands are kept for 15 minutes in case it comes back.`;
   const d = $('devInfo');
   if (!status) { d.innerHTML = '<dt>Status</dt><dd>No report yet</dd>'; return; }
   const n = status.net || {};

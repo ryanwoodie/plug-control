@@ -228,7 +228,8 @@ static bool capReached() {
 static void linkTask(void *) {
   uint32_t nextTry = 0, lastNetInfo = 0, lastTimeSync = 0;
   int fails = 0;
-  bool radioOff = false;
+  bool dataOff = false, wasOnline = false;
+  uint32_t onlineSince = 0;
 
   while (!modemPowerOn()) {
     Serial.println("[link] modem not responding, retrying in 60s");
@@ -243,24 +244,41 @@ static void linkTask(void *) {
   for (;;) {
     meterRoll();
 
+    static uint32_t lastDbg = 0;
+    if (!lastDbg || millis() - lastDbg > 10 * 60 * 1000UL) {
+      lastDbg = millis();
+      Serial.printf("[meter] up=%lus online=%d today=%u month=%u | boot: conn=%u tx=%u rx=%u ovh=%u sessions=%u pub=%u recv=%u\n",
+                    millis() / 1000, mqtt.connected(), info.today, info.month, dbgConn, dbgTx, dbgRx, dbgOvh,
+                    dbgReconnects, dbgPub, dbgRecv);
+    }
+
     if (capReached()) {
-      if (mqtt.connected()) mqtt.disconnect();
-      if (!radioOff) {
-        Serial.println("[link] data cap reached, radio off");
+      // Close the data session but stay registered: registration uses no
+      // data and keeps the network clock coming, which the cap needs to know
+      // when the day rolls over (radio off here deadlocked after a reboot).
+      if (!dataOff) {
+        Serial.println("[link] data cap reached, data session closed until the period rolls over");
+        if (mqtt.connected()) mqtt.disconnect();
+        modem.gprsDisconnect();
         setOnline(false);
-        modem.setPhoneFunctionality(4);
         meterSave();
-        radioOff = true;
+        dataOff = true;
+        wasOnline = false;
       }
+      if (time(nullptr) < 1700000000 && modem.isNetworkConnected()) syncNetworkTime();
       delay(60000);
       continue;
     }
-    if (radioOff) {
-      modem.setPhoneFunctionality(1);
-      radioOff = false;
+    if (dataOff) {
+      Serial.println("[link] data cap cleared");
+      dataOff = false;
     }
 
     if (!mqtt.connected()) {
+      if (wasOnline) {
+        Serial.printf("[link] mqtt lost after %lus online (state=%d)\n", (millis() - onlineSince) / 1000, mqtt.state());
+        wasOnline = false;
+      }
       setOnline(false);
       if ((int32_t)(millis() - nextTry) < 0) {
         delay(250);
@@ -285,6 +303,8 @@ static void linkTask(void *) {
       if (ok) {
         fails = 0;
         setOnline(true);
+        wasOnline = true;
+        onlineSince = millis();
         readNetInfo();
         lastNetInfo = millis();
       } else {
@@ -304,12 +324,6 @@ static void linkTask(void *) {
     }
 
     mqtt.loop();
-    static uint32_t lastDbg = 0;
-    if (millis() - lastDbg > 10 * 60 * 1000UL) {
-      lastDbg = millis();
-      Serial.printf("[meter] today=%u since boot: conn=%u tx=%u rx=%u ovh=%u sessions=%u pub=%u recv=%u\n",
-                    info.today, dbgConn, dbgTx, dbgRx, dbgOvh, dbgReconnects, dbgPub, dbgRecv);
-    }
     Msg *m;
     while (xQueueReceive(outQ, &m, 0) == pdTRUE) {
       mqtt.publish(m->topic.c_str(), m->data.data(), m->data.size(), true);

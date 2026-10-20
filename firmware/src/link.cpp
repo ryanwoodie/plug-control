@@ -26,7 +26,10 @@ static uint32_t meterDay = 0, meterMonth = 0, lastMeterSave = 0;
 // Breakdown since boot, for the serial log.
 static uint32_t dbgConn, dbgTx, dbgRx, dbgOvh, dbgReconnects, dbgPub, dbgRecv;
 
+static uint32_t lastTrafficMs = 0;
+
 static void meterAdd(uint32_t n) {
+  lastTrafficMs = millis();
   xSemaphoreTake(infoLock, portMAX_DELAY);
   info.today += n;
   info.month += n;
@@ -335,6 +338,9 @@ static void linkTask(void *) {
     }
 
     mqtt.loop();
+    // The modem's TCP keep-alive probes are invisible to us: count a probe
+    // and its ACK (~104 B) for every keep-alive period with no traffic.
+    if (millis() - lastTrafficMs >= TCP_KEEPIDLE_MIN * 60000UL) meterAdd(104);
     Msg *m;
     while (xQueueReceive(outQ, &m, 0) == pdTRUE) {
       mqtt.publish(m->topic.c_str(), m->data.data(), m->data.size(), true);

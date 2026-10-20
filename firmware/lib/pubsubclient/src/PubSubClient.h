@@ -112,6 +112,7 @@ private:
    uint16_t port;
    Stream* stream;
    int _state;
+   boolean _sessionPresent = false;
 public:
    PubSubClient();
    PubSubClient(Client& client);
@@ -142,6 +143,9 @@ public:
    boolean setBufferSize(uint16_t size);
    uint16_t getBufferSize();
 
+   // plugctl patch: true when the broker resumed a persistent session
+   // (cleanSession=false), so existing subscriptions are still in place.
+   boolean sessionPresent() { return _sessionPresent; }
    boolean connect(const char* id);
    boolean connect(const char* id, const char* user, const char* pass);
    boolean connect(const char* id, const char* willTopic, uint8_t willQos, boolean willRetain, const char* willMessage);

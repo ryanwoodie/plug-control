@@ -207,13 +207,18 @@ static bool mqttConnect() {
   mqtt.setSocketTimeout(30);
   mqtt.setBufferSize(2048);
   mqtt.setCallback(onMessage);
-  if (!mqtt.connect(id)) {
+  // Persistent session: the broker keeps our subscriptions and queues QoS 1
+  // messages while we are away, so a reconnect costs a bare CONNECT instead
+  // of re-subscribing and re-downloading every retained message.
+  if (!mqtt.connect(id, nullptr, nullptr, nullptr, 0, false, nullptr, false)) {
     Serial.printf("[link] mqtt connect failed state=%d\n", mqtt.state());
     return false;
   }
-  for (auto &t : subs) mqtt.subscribe(t.c_str(), 0);
+  if (!mqtt.sessionPresent()) {
+    for (auto &t : subs) mqtt.subscribe(t.c_str(), 1);
+  }
   dbgReconnects++;
-  Serial.println("[link] mqtt online");
+  Serial.printf("[link] mqtt online (session %s)\n", mqtt.sessionPresent() ? "resumed" : "new");
   return true;
 }
 

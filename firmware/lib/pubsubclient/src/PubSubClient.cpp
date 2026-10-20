@@ -267,6 +267,7 @@ boolean PubSubClient::connect(const char *id, const char *user, const char *pass
 
             if (len == 4) {
                 if (buffer[3] == 0) {
+                    _sessionPresent = buffer[2] & 0x01;  // plugctl patch: CONNACK session-present flag
                     lastInActivity = millis();
                     pingOutstanding = false;
                     _state = MQTT_CONNECTED;

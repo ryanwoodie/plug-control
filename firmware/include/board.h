@@ -21,7 +21,10 @@
 #define MQTT_PORT 1883
 
 // Data-budget knobs. 500 MB / 10 years is about 137 KB/day.
-#define MQTT_KEEPALIVE_S 900               // idle ping interval (main idle cost)
+// The 1NCE path drops idle TCP connections after 4-6 min (measured
+// 2026-10-19: 240 s idle survived, 360 s did not), so ping inside that.
+// Each ping is ~160 B on the SIM: ~60 KB/day, the main idle cost.
+#define MQTT_KEEPALIVE_S 225
 #define HEARTBEAT_S (6 * 3600)             // unsolicited full status
 #define DAILY_CAP_BYTES (150UL * 1024)     // estimated; link goes quiet until tomorrow
 #define MONTHLY_CAP_BYTES (3000UL * 1024)  // estimated; link goes quiet until next month

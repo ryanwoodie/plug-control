@@ -303,6 +303,12 @@ static void linkTask(void *) {
           Serial.println("[link] opening data session");
           modem.gprsConnect(APN);
         }
+        if (modem.isGprsConnected()) {
+          // Applies to sockets opened afterwards; only accepted once the data
+          // session is up, and not saved, so set it before every connect.
+          modem.sendAT(GF("+CTCPKA=1,"), TCP_KEEPIDLE_MIN, GF(",3,1"));
+          modem.waitResponse(9000L);
+        }
         ok = modem.isGprsConnected() && mqttConnect();
       }
       if (ok) {

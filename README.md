@@ -14,7 +14,7 @@ Remote control for Shelly smart plugs over a 1NCE IoT SIM, built to last
   working without cell coverage. Timers and schedule end times are also set
   on the plug itself (`toggle_after`), so a plug still turns off if the
   controller loses power.
-- **One MQTT session** on the SIM. Idle cost is a keepalive ping every 225 s;
+- **One MQTT session** on the SIM. Idle cost is a TCP keep-alive probe every 5 min;
   status is sent only when something changes, plus every 6 h.
 - **End-to-end encrypted.** Each owner's messages are AES-128-GCM with a key
   derived from their password (PBKDF2-SHA256, 100k rounds). The topic name
@@ -34,19 +34,21 @@ the controller's Wi-Fi, which works with no cell service.
 
 ## Expected data use
 
-The 1NCE path drops idle TCP connections after 4–6 minutes (measured: 240 s
-idle survived, 360 s did not), so the controller pings every 225 s. That ping
-is the main running cost.
+The 1NCE path drops idle TCP connections after 5.5–6 minutes (measured:
+330 s idle survived, 360 s did not). The modem's own TCP keep-alive
+(`AT+CTCPKA`, every 5 min) holds the connection open with a bare probe and
+ACK, which is cheaper than an MQTT ping; MQTT pings run hourly as a backstop.
 
 | Item | Per day |
 | --- | --- |
-| Keepalive pings (384/day, ~160 B each) | ~60 KB |
+| TCP keep-alive probes (288/day, ~100 B each) | ~29 KB |
+| Hourly MQTT ping | ~4 KB |
 | Heartbeat status (2 owners, every 6 h) | ~3.5 KB |
 | Each command or settings change + reply | ~1 KB |
 | Reconnect after a dropped session (persistent session, no re-download) | <1 KB |
 
-Roughly 65 KB/day idle, about 24 MB a year or ~240 MB over 10 years, so about
-half the 500 MB. The 1NCE portal (SIM quota) shows the real figure.
+Roughly 35–40 KB/day idle, about 14 MB a year or ~140 MB over 10 years. The
+1NCE portal (SIM quota) shows the real figure.
 
 ## Setup
 

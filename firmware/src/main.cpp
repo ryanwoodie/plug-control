@@ -1,5 +1,5 @@
 // Plug controller: LilyGo T-A7670G runs a private Wi-Fi network for Shelly
-// plugs, runs their schedules locally, and talks to the web app over one
+// and Kasa plugs, runs their schedules locally, and talks to the web app over one
 // low-traffic, end-to-end encrypted MQTT session on the 1NCE SIM.
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -9,6 +9,7 @@
 #include <sys/time.h>
 #include "board.h"
 #include "crypto.h"
+#include "kasa.h"
 #include "link.h"
 #include "secrets.h"
 #include "shelly.h"
@@ -38,6 +39,7 @@ struct Plug {
   char src = '-';  // what last switched it: s=schedule m=manual t=timer b=button/local
   bool prevWant = false, schedPending = false;
   uint32_t lastCmdMs = 0;
+  bool kasa() const { return def->type == 'k'; }
 };
 
 // Report urgency. Urgent changes (on/off, acks) go out in ~3 s; lazy ones
@@ -115,7 +117,7 @@ static void saveSeen(uint8_t oi) {
 // ---- plug control --------------------------------------------------------
 static bool setPlug(Plug &p, bool on, uint32_t secs, char src) {
   p.lastCmdMs = millis();
-  if (!shellySet(p.ip, on, secs)) return false;
+  if (p.ip.isEmpty() || !(p.kasa() ? kasaSet(p.ip, on, secs) : shellySet(p.ip, on, secs))) return false;
   p.on = on;
   p.src = src;
   p.timerEnd = (on && secs && timeValid()) ? time(nullptr) + secs : 0;
@@ -124,9 +126,27 @@ static bool setPlug(Plug &p, bool on, uint32_t secs, char src) {
   return true;
 }
 
+static bool pollKasa(Plug &p, ShellyStatus &st) {
+  String ip = kasaFindIp(p.def->mac);  // DHCP only, so it can move
+  if (ip.length()) p.ip = ip;
+  KasaStatus ks;
+  if (p.ip.isEmpty() || !kasaGetStatus(p.ip, ks)) return false;
+  st = {ks.on, 0, 0, 0};
+  if (!ks.clockSet) {
+    // It lost power. Kasa plugs restore their last state and drop their
+    // countdown, so switch it off like a Shelly would; a schedule re-applies.
+    Serial.printf("[plug] %s restarted\n", p.def->mac);
+    kasaSetClock(p.ip);
+    if (ks.on && kasaSet(p.ip, false)) st.on = false;
+    p.timerEnd = 0;
+    if (p.prevWant) p.schedPending = true;
+  }
+  return true;
+}
+
 static void pollPlug(Plug &p) {
   ShellyStatus st;
-  if (!shellyGetStatus(p.ip, st)) {
+  if (!(p.kasa() ? pollKasa(p, st) : shellyGetStatus(p.ip, st))) {
     if (p.reachable && ++p.misses >= 8) {  // ~1 min of silence
       p.reachable = false;
       markDirty(p.def->owner, DIRTY_LAZY);
@@ -142,7 +162,7 @@ static void pollPlug(Plug &p) {
     Serial.printf("[plug] %s online at %s\n", p.def->mac, p.ip.c_str());
     if (p.prevWant && !st.on && p.src == 's') p.schedPending = true;  // plug lost power mid-window
   }
-  if (!p.hardened && shellyHarden(p.ip, p.name.c_str())) {
+  if (!p.hardened && (p.kasa() ? kasaHarden(p.ip, p.name.c_str()) : shellyHarden(p.ip, p.name.c_str()))) {
     p.hardened = true;
     prefs.putBool(("h" + String(p.def->mac)).c_str(), true);
   }
@@ -277,9 +297,11 @@ static String buildStatus(uint8_t oi) {
     j["n"] = p.name;
     j["ok"] = p.reachable ? 1 : 0;
     j["on"] = p.on ? 1 : 0;
-    j["w"] = roundf(p.watts * 10) / 10;
-    j["v"] = roundf(p.volts);
-    j["kwh"] = roundf(p.wh) / 1000.0;
+    if (!p.kasa()) {  // Kasa HS103 has no power metering
+      j["w"] = roundf(p.watts * 10) / 10;
+      j["v"] = roundf(p.volts);
+      j["kwh"] = roundf(p.wh) / 1000.0;
+    }
     j["te"] = (uint32_t)p.timerEnd;
     j["s"] = String(p.src);
   }
@@ -395,10 +417,14 @@ static void provisionMissing() {
   int n = WiFi.scanNetworks(false, false, false, 120);
   for (int i = 0; i < n; i++) {
     String ssid = WiFi.SSID(i);
-    if (!ssid.startsWith("Shelly") && !ssid.startsWith("shelly")) continue;
+    bool shelly = ssid.startsWith("Shelly") || ssid.startsWith("shelly");
+    if (!shelly && !ssid.startsWith("TP-LINK_Smart Plug_")) continue;
     for (auto &p : plugs) {
-      if (!p.reachable && ssid.endsWith(p.def->mac)) {
-        shellyProvision(ssid, p.ip, AP_SSID, AP_PASS);
+      if (p.reachable || p.kasa() == shelly) continue;
+      // Shelly APs end in the whole MAC, Kasa ones in its last 4 digits.
+      if (ssid.endsWith(shelly ? p.def->mac : p.def->mac + 8)) {
+        if (shelly) shellyProvision(ssid, p.ip, AP_SSID, AP_PASS);
+        else kasaProvision(ssid, AP_SSID, AP_PASS);
         p.hardened = false;
         prefs.remove(("h" + String(p.def->mac)).c_str());
       }
@@ -416,7 +442,8 @@ static void setupWeb() {
     for (int i = 0; i < PLUG_COUNT; i++) {
       Plug &p = plugs[i];
       h += "<div><b>" + p.name + "</b> &middot; " + owners[p.def->owner].def->user + "<br>" +
-           (p.reachable ? (p.on ? "ON " : "OFF ") + String(p.watts, 1) + " W" : String("unreachable")) +
+           (p.reachable ? (p.on ? "ON " : "OFF ") + (p.kasa() ? String() : String(p.watts, 1) + " W")
+                        : String("unreachable")) +
            "<br><a href='/set?i=" + i + "&on=1'>On</a><a href='/set?i=" + i + "&on=0'>Off</a>" +
            "<a href='/set?i=" + i + "&on=1&m=60'>On 1h</a></div>";
     }
@@ -472,7 +499,7 @@ void setup() {
   for (int i = 0; i < PLUG_COUNT; i++) {
     plugs[i].def = &PLUGS[i];
     plugs[i].name = PLUGS[i].name;
-    plugs[i].ip = "192.168.4." + String(PLUG_IP_BASE + i);
+    if (!plugs[i].kasa()) plugs[i].ip = "192.168.4." + String(PLUG_IP_BASE + i);
     plugs[i].hardened = prefs.getBool(("h" + String(PLUGS[i].mac)).c_str(), false);
   }
   for (uint8_t i = 0; i < OWNER_COUNT; i++) {

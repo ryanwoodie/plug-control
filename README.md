@@ -1,10 +1,10 @@
 # Plug Control
 
-Remote control for Shelly smart plugs over a 1NCE IoT SIM, built to last
+Remote control for Shelly and TP-Link Kasa smart plugs over a 1NCE IoT SIM, built to last
 10 years on 500 MB of data.
 
 ```
- Shelly plugs ──Wi-Fi (private, no internet)──> LilyGo T-A7670G ──LTE / 1NCE──> MQTT broker <──wss── web app (GitHub Pages)
+ Shelly/Kasa plugs ──Wi-Fi (private, no internet)──> LilyGo T-A7670G ──LTE / 1NCE──> MQTT broker <──wss── web app (GitHub Pages)
 ```
 
 - **Plugs never touch the internet.** The LilyGo runs its own WPA2 network
@@ -57,9 +57,11 @@ Roughly 35–40 KB/day idle, about 14 MB a year or ~140 MB over 10 years. The
 
    ```bash
    tools/make_secrets.py --owner C-GMEH --owner C-FTBV \
-     --plug "ACEBE6F17B6C:C-GMEH:C-GMEH plug" --plug "ACEBE6F17C50:C-FTBV:C-FTBV plug"
+     --plug "D84489C1EB5C:C-GMEH:C-GMEH plug" --plug "ACEBE6F17C50:C-FTBV:C-FTBV plug" \
+     --kasa D84489C1EB5C
    ```
 
+   `--kasa MAC` marks a plug as a Kasa plug (default is Shelly).
    Add `--password C-GMEH=...` to choose a password instead of a random one.
    Changing passwords or plug ownership means re-running this and reflashing.
    The board's Wi-Fi credentials are kept, so plugs stay connected; saved
@@ -69,7 +71,7 @@ Roughly 35–40 KB/day idle, about 14 MB a year or ~140 MB over 10 years. The
 
 2. Flash: `cd firmware && pio run -t upload`.
 
-3. Plug in factory-fresh (or factory-reset) Shelly plugs listed in
+3. Plug in factory-fresh (or factory-reset) plugs listed in
    `--plug`. The controller finds their setup Wi-Fi and moves them onto its
    own network within a few minutes. Only listed MACs are touched.
 
@@ -78,12 +80,23 @@ Roughly 35–40 KB/day idle, about 14 MB a year or ~140 MB over 10 years. The
 
 To factory-reset a Shelly Plug US Gen4, hold its button for about 10 s.
 
+Kasa plugs (tested: HS103 hardware 5.0, firmware 1.0.13) are controlled with
+TP-Link's old local protocol on port 9999. Newer Kasa firmware that dropped it
+(e.g. HS103 1.1.3) won't work, so never set a plug up in the Kasa app with
+internet access. To reset one, hold its button for about 10 s until the light
+blinks amber and blue. Differences from a Shelly: no power readings, a DHCP
+address the board finds by MAC, and the max-on limit runs on the plug's own
+countdown, which needs its clock set. The board sets the clock whenever the
+plug restarts, and also switches the plug off then, since Kasa plugs come
+back on after a power cut.
+
 ## Layout
 
 - `firmware/`: PlatformIO project for the LilyGo T-A7670G (ESP32)
   - `src/main.cpp`: plugs, schedules, commands, status, GPS, on-site page
   - `src/link.cpp`: modem, MQTT session, data meter and caps
   - `src/shelly.cpp`: Shelly Gen2+ RPC and provisioning
+  - `src/kasa.cpp`: Kasa local protocol (port 9999) and provisioning
   - `src/crypto.cpp`: AES-GCM message sealing
   - `lib/`: LilyGo's TinyGSM fork and PubSubClient
 - `docs/`: the web app (served by GitHub Pages)

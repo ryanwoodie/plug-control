@@ -224,7 +224,7 @@ function plugCard(mac, s, pc) {
       <span class="dot"></span><span class="big">${stateTxt}</span> ${timer}
     </div>
     ${via}
-    ${s.ok ? `<p class="meter"><span>${(s.w ?? 0).toFixed(1)} W</span><span>${s.v ?? '–'} V</span><span>${(s.kwh ?? 0).toFixed(3)} kWh total</span></p>` : ''}
+    ${s.ok && s.w !== undefined ? `<p class="meter"><span>${(s.w ?? 0).toFixed(1)} W</span><span>${s.v ?? '–'} V</span><span>${(s.kwh ?? 0).toFixed(3)} kWh total</span></p>` : ''}
     ${pendTxt}
     <div class="actions">
       <button class="${isOn ? 'sel-on' : ''}" aria-pressed="${isOn}" data-act="on" data-mac="${mac}">On</button>

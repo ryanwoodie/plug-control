@@ -11,6 +11,10 @@ const PBKDF2_ITERS = 100000; // must match tools/make_secrets.py
 const CMD_MAX_AGE = 900;     // seconds; matches CMD_MAX_AGE_S in firmware
 const STALE_AFTER = 10 * 60; // auto-refresh if the last status is older than this
 const OFFLINE_AFTER = 6.5 * 3600; // the controller reports at least every 6 h
+// The controller drops MQTT packets over 2048 bytes (firmware link.cpp), so a
+// config must stay well under that once sealed and wrapped.
+const CFG_MAX_BYTES = 1800;
+const REPORT_BYTES = 450; // one status report over the SIM, as metered by the controller
 
 const TIMEZONES = [
   ['CST6', 'Saskatchewan (CST, no DST)'],
@@ -129,7 +133,16 @@ function baseConfig() {
 async function saveConfig(cfg) {
   cfg.v = Date.now();
   cfg.t = nowS();
-  for (const pc of Object.values(cfg.p)) pc.o = (pc.o || []).filter((o) => o.at + o.m * 60 > cfg.t);
+  for (const pc of Object.values(cfg.p)) {
+    pc.o = (pc.o || []).filter((o) => o.at + o.m * 60 > cfg.t);
+    if (pc.oc) pc.oc = pc.oc.filter((c) => c.at + c.m * 60 > cfg.t);
+  }
+  const size = enc.encode(JSON.stringify(cfg)).length;
+  if (size > CFG_MAX_BYTES) {
+    alert(`That's too many on/off switches for the controller to take in one go (settings would be ${size} bytes, ` +
+      `limit ${CFG_MAX_BYTES}). Use a longer on/off cycle, a shorter run, or fewer rotations.`);
+    return false;
+  }
   config = cfg;
   pendingCfg = cfg.v;
   await publish('c', cfg);
@@ -170,6 +183,52 @@ function durOptions(sel, mins, value) {
   sel.value = String(value);
 }
 const DURS = [15, 30, 45, 60, 90, 120, 150, 180, 240, 300, 360, 480, 600, 720];
+const RUN_DURS = [...DURS, 900, 1080, 1440];
+const CYCLE_DURS = [1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240];
+
+// ---- rotations --------------------------------------------------------------------
+// The controller only knows plain on-windows, so a rotation ("on 15 min, off
+// 45 min, for 4 h") is saved twice: its definition (pc.rc for schedules, pc.oc
+// for one-time, which the controller ignores) and the on-windows it expands to,
+// tagged with the rotation's id g (in pc.r / pc.o, which the controller runs).
+function cycleWindows(total, on, off) {
+  const w = [];
+  for (let t = 0; t < total; t += on + off) w.push([t, Math.min(on, total - t)]);
+  return w;
+}
+const rotDays = (d, k) => ((d << k) | (d >> (7 - k))) & 127; // shift weekdays k days later
+
+function expandRule(c) {
+  if (!c.e) return [];
+  return cycleWindows(c.m, c.on, c.off).map(([t, m]) => {
+    const s = c.s + t;
+    return { d: rotDays(c.d, Math.floor(s / 1440) % 7), s: s % 1440, m, g: c.g };
+  });
+}
+const expandOnce = (c) => cycleWindows(c.m, c.on, c.off).map(([t, m]) => ({ at: c.at + t * 60, m, g: c.g }));
+const nextG = (pc) => 1 + Math.max(0, ...(pc.rc || []).map((c) => c.g), ...(pc.oc || []).map((c) => c.g));
+const fmtCycle = (c) => `${fmtDur(c.on)} on / ${fmtDur(c.off)} off`;
+
+// Shows the on/off pickers when "Cycle on and off" is ticked.
+function cycleControls(prefix, c) {
+  const cyc = $(prefix + 'Cyc'), opts = $(prefix + 'CycOpts');
+  durOptions($(prefix + 'On'), CYCLE_DURS, c?.on || 15);
+  durOptions($(prefix + 'Off'), CYCLE_DURS, c?.off || 45);
+  cyc.checked = !!c;
+  const info = () => {
+    const n = cycleWindows(+$(prefix + 'Dur').value, +$(prefix + 'On').value, +$(prefix + 'Off').value).length;
+    // Each switch sends one status report over the SIM.
+    $(prefix + 'CycInfo').textContent = `${n} on-periods per run, about ${kb(n * 2 * REPORT_BYTES)} of SIM data per run.`;
+  };
+  for (const k of ['Dur', 'On', 'Off']) $(prefix + k).onchange = info;
+  cyc.onchange = () => {
+    opts.hidden = !cyc.checked;
+    $(prefix + 'DurLbl').textContent = cyc.checked ? 'Run for' : 'Keep on for';
+    info();
+  };
+  cyc.onchange();
+}
+const readCycle = (prefix) => ($(prefix + 'Cyc').checked ? { on: +$(prefix + 'On').value, off: +$(prefix + 'Off').value } : null);
 
 // ---- rendering ------------------------------------------------------------------
 function setBanner(text, kind = 'info') {
@@ -205,15 +264,23 @@ function plugCard(mac, s, pc) {
   const timer = s.on && s.te > nowS() ? `<span class="pill">off at ${fmtTime(s.te)}</span>` : '';
   const via = s.ok && SRC[s.s] ? `<span class="muted small">${s.on ? 'turned on' : 'turned off'} ${SRC[s.s]}</span>` : '';
   const pendTxt = pend.length ? `<p class="pending">Sending “${pend.at(-1).a === 'tmr' ? 'timer' : pend.at(-1).a}” to the controller…</p>` : '';
-  const rules = (pc.r || []).map((r, i) => `
+  const ruleLi = (r, data, cyc) => `
       <li class="${r.e === 0 ? 'disabled' : ''}">
-        <button class="link" data-act="editRule" data-mac="${mac}" data-i="${i}">
-          <b>${esc(r.nm || 'Schedule')}</b> · ${fmtDays(r.d)} · ${fmtHM(r.s)} for ${fmtDur(r.m)}${r.e === 0 ? ' (off)' : ''}
+        <button class="link" data-act="editRule" data-mac="${mac}" ${data}>
+          <b>${esc(r.nm || 'Schedule')}</b> · ${fmtDays(r.d)} · ${fmtHM(r.s)} for ${fmtDur(r.m)}${cyc ? ', cycling ' + fmtCycle(r) : ''}${r.e === 0 ? ' (off)' : ''}
         </button>
-      </li>`).join('');
-  const ones = (pc.o || []).filter((o) => o.at + o.m * 60 > nowS()).map((o, i) => `
-      <li><span>${fmtTime(o.at)} for ${fmtDur(o.m)}</span>
-        <button class="link danger" data-act="delOnce" data-mac="${mac}" data-at="${o.at}">Remove</button></li>`).join('');
+      </li>`;
+  const rules = [
+    ...(pc.r || []).map((r, i) => (r.g ? '' : ruleLi(r, `data-i="${i}"`, false))),
+    ...(pc.rc || []).map((c) => ruleLi(c, `data-g="${c.g}"`, true)),
+  ].join('');
+  const onceLi = (o, data, cyc) => `
+      <li><span>${fmtTime(o.at)} for ${fmtDur(o.m)}${cyc ? ', cycling ' + fmtCycle(o) : ''}</span>
+        <button class="link danger" data-act="delOnce" data-mac="${mac}" ${data}>Remove</button></li>`;
+  const ones = [
+    ...(pc.o || []).filter((o) => !o.g && o.at + o.m * 60 > nowS()).map((o) => onceLi(o, `data-at="${o.at}"`, false)),
+    ...(pc.oc || []).filter((c) => c.at + c.m * 60 > nowS()).map((c) => onceLi(c, `data-g="${c.g}"`, true)),
+  ].join('');
   return `
   <section class="card plug">
     <div class="row between">
@@ -286,27 +353,41 @@ function ask(dlg) {
   });
 }
 
-async function editRule(mac, i) {
+// i: index of a plain rule in pc.r; g: id of a rotation in pc.rc; neither: new.
+async function editRule(mac, i, g) {
   const cfg = baseConfig();
   const pc = plugCfg(cfg, mac);
-  const r = i == null ? { d: 127, s: 360, m: 120, e: 1, nm: '' } : pc.r[i];
-  $('ruleTitle').textContent = i == null ? 'New schedule' : 'Edit schedule';
+  const isNew = i == null && g == null;
+  const rot = g != null ? pc.rc.find((c) => c.g === g) : null;
+  const r = isNew ? { d: 127, s: 360, m: 120, e: 1, nm: '' } : rot || pc.r[i];
+  $('ruleTitle').textContent = isNew ? 'New schedule' : 'Edit schedule';
   $('ruleName').value = r.nm || '';
   $('ruleDays').innerHTML = DAYS.map((d, k) =>
     `<label class="chip"><input type="checkbox" value="${k}" ${r.d & (1 << k) ? 'checked' : ''}><span>${d}</span></label>`).join('');
   $('ruleStart').value = fmtHM(r.s);
-  durOptions($('ruleDur'), DURS, DURS.includes(r.m) ? r.m : 120);
+  durOptions($('ruleDur'), RUN_DURS, RUN_DURS.includes(r.m) ? r.m : 120);
+  cycleControls('rule', rot);
   $('ruleEn').checked = r.e !== 0;
-  $('ruleDelete').hidden = i == null;
+  $('ruleDelete').hidden = isNew;
   const res = await ask($('ruleDlg'));
-  if (res === 'delete') { pc.r.splice(i, 1); return saveConfig(cfg); }
-  if (res !== 'save') return;
+  if (res !== 'save' && res !== 'delete') return;
+  // Take out the old entry (and a rotation's windows); a save adds it back.
+  if (rot) {
+    pc.rc = pc.rc.filter((c) => c.g !== g);
+    pc.r = pc.r.filter((x) => x.g !== g);
+  } else if (!isNew) pc.r.splice(i, 1);
+  if (res === 'delete') return saveConfig(cfg);
   const days = [...$('ruleDays').querySelectorAll('input:checked')].reduce((a, el) => a | (1 << +el.value), 0);
   if (!days) return alert('Pick at least one day.');
   const [hh, mm] = $('ruleStart').value.split(':').map(Number);
   const nr = { nm: $('ruleName').value.trim(), d: days, s: hh * 60 + mm, m: +$('ruleDur').value, e: $('ruleEn').checked ? 1 : 0 };
-  if (i == null) pc.r.push(nr); else pc.r[i] = nr;
-  if (pc.r.length > 8) return alert('Up to 8 schedules per plug.');
+  const cyc = readCycle('rule');
+  if (cyc) {
+    const c = { g: rot?.g || nextG(pc), ...nr, ...cyc };
+    (pc.rc ||= []).push(c);
+    pc.r.push(...expandRule(c));
+  } else pc.r.push(nr);
+  if (pc.r.filter((x) => !x.g).length + (pc.rc || []).length > 8) return alert('Up to 8 schedules per plug.');
   await saveConfig(cfg);
 }
 
@@ -315,13 +396,21 @@ async function addOnce(mac) {
   start.setMinutes(0, 0, 0);
   const local = new Date(start - start.getTimezoneOffset() * 60e3).toISOString().slice(0, 16);
   $('onceAt').value = local;
-  durOptions($('onceDur'), DURS, 120);
+  durOptions($('onceDur'), RUN_DURS, 120);
+  cycleControls('once', null);
   if (await ask($('onceDlg')) !== 'save') return;
   const at = Math.floor(new Date($('onceAt').value).getTime() / 1000);
   if (!(at > nowS() - 60)) return alert('Pick a time in the future.');
   const cfg = baseConfig();
   const pc = plugCfg(cfg, mac);
-  pc.o = [...(pc.o || []), { at, m: +$('onceDur').value }].sort((a, b) => a.at - b.at).slice(-8);
+  const m = +$('onceDur').value, cyc = readCycle('once');
+  if (cyc) {
+    const c = { g: nextG(pc), at, m, ...cyc };
+    (pc.oc ||= []).push(c);
+    pc.o = [...(pc.o || []), ...expandOnce(c)];
+  } else pc.o = [...(pc.o || []), { at, m }];
+  pc.o.sort((a, b) => a.at - b.at);
+  if (pc.o.filter((o) => !o.g).length + (pc.oc || []).length > 8) return alert('Up to 8 one-time entries per plug.');
   await saveConfig(cfg);
 }
 
@@ -346,17 +435,20 @@ async function timer(mac) {
 document.addEventListener('click', async (e) => {
   const b = e.target.closest('[data-act]');
   if (!b) return;
-  const { act, mac, i, at } = b.dataset;
+  const { act, mac, i, at, g } = b.dataset;
   if (act === 'on' || act === 'off') return sendCmd(act, mac);
   if (act === 'timer') return timer(mac);
   if (act === 'addRule') return editRule(mac, null);
-  if (act === 'editRule') return editRule(mac, +i);
+  if (act === 'editRule') return g ? editRule(mac, null, +g) : editRule(mac, +i);
   if (act === 'addOnce') return addOnce(mac);
   if (act === 'plugSettings') return plugSettings(mac);
   if (act === 'delOnce') {
     const cfg = baseConfig();
     const pc = plugCfg(cfg, mac);
-    pc.o = (pc.o || []).filter((o) => o.at !== +at);
+    if (g) {
+      pc.oc = (pc.oc || []).filter((c) => c.g !== +g);
+      pc.o = (pc.o || []).filter((o) => o.g !== +g);
+    } else pc.o = (pc.o || []).filter((o) => o.g || o.at !== +at);
     return saveConfig(cfg);
   }
 });

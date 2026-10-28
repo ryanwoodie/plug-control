@@ -54,7 +54,13 @@
       <fieldset class="days" id="ruleDays"></fieldset>
       <div class="row">
         <label>Turn on at <input id="ruleStart" type="time" required></label>
-        <label>Keep on for <select id="ruleDur"></select></label>
+        <label><span id="ruleDurLbl">Keep on for</span> <select id="ruleDur"></select></label>
+      </div>
+      <label class="check"><input id="ruleCyc" type="checkbox"> Cycle on and off</label>
+      <div class="row" id="ruleCycOpts" hidden>
+        <label>On for <select id="ruleOn"></select></label>
+        <label>then off for <select id="ruleOff"></select></label>
+        <p class="muted small" id="ruleCycInfo"></p>
       </div>
       <label class="check"><input id="ruleEn" type="checkbox" checked> Enabled</label>
       <div class="row between">
@@ -68,7 +74,13 @@
     <form method="dialog">
       <h3>One-time</h3>
       <label>Turn on at <input id="onceAt" type="datetime-local" required></label>
-      <label>Keep on for <select id="onceDur"></select></label>
+      <label><span id="onceDurLbl">Keep on for</span> <select id="onceDur"></select></label>
+      <label class="check"><input id="onceCyc" type="checkbox"> Cycle on and off</label>
+      <div class="row" id="onceCycOpts" hidden>
+        <label>On for <select id="onceOn"></select></label>
+        <label>then off for <select id="onceOff"></select></label>
+        <p class="muted small" id="onceCycInfo"></p>
+      </div>
       <div class="row between">
         <span></span>
         <span><button value="cancel" formnovalidate>Cancel</button> <button value="save" class="primary">Save</button></span>

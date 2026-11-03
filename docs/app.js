@@ -86,7 +86,7 @@ function connect() {
     connectTimeout: 15000,
   });
   client.on('connect', () => {
-    client.subscribe(Object.values(session.topics));
+    client.subscribe([...Object.values(session.topics), histBase() + 'h/+']);
     setBanner(null);
     setTimeout(() => {
       if (!gotAnything) setBanner('No data for this login yet. Check the username and password. If they are right, the controller has not reported in yet.', 'warn');
@@ -101,6 +101,7 @@ function connect() {
     if (topic === session.topics.s) { status = msg; if (pendingCfg && msg.cv >= pendingCfg) pendingCfg = 0; }
     else if (topic === session.topics.c) { if (!config || msg.v >= config.v) config = msg; }
     else if (topic === session.topics.x) { cmds = msg; }
+    else if (topic.startsWith(histBase() + 'h/')) { histAdd(msg); if (!$('history').hidden) histDraw(false); return; }
     setBanner(null);
     render();
   });
@@ -285,7 +286,8 @@ function plugCard(mac, s, pc) {
   <section class="card plug">
     <div class="row between">
       <h2>${esc(pc.n || s.n || mac)}</h2>
-      <button class="link" data-act="plugSettings" data-mac="${mac}">Settings</button>
+      <span><button class="link" data-act="history" data-mac="${mac}">History</button>
+        <button class="link" data-act="plugSettings" data-mac="${mac}">Settings</button></span>
     </div>
     <div class="state ${stateCls}">
       <span class="dot"></span><span class="big">${stateTxt}</span> ${timer}
@@ -442,6 +444,7 @@ document.addEventListener('click', async (e) => {
   if (act === 'editRule') return g ? editRule(mac, null, +g) : editRule(mac, +i);
   if (act === 'addOnce') return addOnce(mac);
   if (act === 'plugSettings') return plugSettings(mac);
+  if (act === 'history') return openHistory(mac);
   if (act === 'delOnce') {
     const cfg = baseConfig();
     const pc = plugCfg(cfg, mac);

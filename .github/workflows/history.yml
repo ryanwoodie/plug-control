@@ -1,0 +1,41 @@
+# Files plug history batches from the MQTT broker into the `history` branch.
+# See tools/collect_history.py. Needs the HISTORY_KEYS secret.
+name: Collect plug history
+
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: history
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: history
+          path: data
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install paho-mqtt==2.1.0 cryptography==43.0.3
+      - run: python tools/collect_history.py data/history
+        env:
+          HISTORY_KEYS: ${{ secrets.HISTORY_KEYS }}
+      - name: Commit
+        working-directory: data
+        run: |
+          git add -A
+          git diff --cached --quiet && exit 0
+          git -c user.name="plug history" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "History $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q

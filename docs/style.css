@@ -129,3 +129,44 @@ fieldset.days { border: 0; padding: 0; margin: 12px 0; display: flex; gap: 6px; 
   dt { margin-top: 6px; }
 }
 .row > p { flex-basis: 100%; margin: 0; }
+
+/* ---- history ---- */
+.row.between > span button.link + button.link { margin-left: 14px; }
+.hist-nav { margin: 4px 0 12px; }
+.hist-nav b { min-width: 9em; text-align: center; }
+.hist-nav button { padding: 6px 12px; }
+.hist-nav select { width: auto; flex: 0 0 auto; }
+.hist-nav .pan { display: inline-flex; align-items: center; gap: 6px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin-bottom: 12px; }
+.tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
+.tile .tl { font-size: .8rem; color: var(--muted); }
+.tile .tv { font-size: 1.3rem; font-weight: 600; }
+.tile .tn { font-size: .8rem; color: var(--muted); }
+.tile .flag { color: var(--danger); font-weight: 600; }
+.dim { opacity: .5; }
+.chart { position: relative; touch-action: pan-y; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .ax { fill: var(--muted); font-size: 11px; }
+.chart .hatch { stroke: var(--line); stroke-width: 2; }
+.chart .band-off { fill: var(--card); }
+.chart .band-on { fill: color-mix(in srgb, var(--on) 12%, var(--card)); }
+.chart .band-on.solid { fill: var(--on); }
+.chart .area { fill: var(--accent); opacity: .1; }
+.chart .pline { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart .cross { stroke: var(--muted); stroke-width: 1; }
+.chart .sel { fill: var(--accent); opacity: .15; }
+.chart .tip { position: absolute; top: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+  padding: 6px 10px; pointer-events: none; display: flex; flex-direction: column; font-size: .85rem; box-shadow: 0 2px 8px rgb(0 0 0 / 12%); }
+.chart .tip[hidden] { display: none; }
+.chart .tip b { font-size: 1rem; }
+.chart .tip span { color: var(--muted); }
+.key { display: flex; align-items: center; gap: 6px 14px; flex-wrap: wrap; }
+.key .ki { display: inline-flex; align-items: center; gap: 6px; }
+.key i { display: inline-block; width: 14px; height: 10px; border-radius: 2px; border: 1px solid var(--line); }
+.key .k-on { background: color-mix(in srgb, var(--on) 12%, var(--card)); }
+.key .k-gap { background: repeating-linear-gradient(45deg, var(--line) 0 2px, var(--card) 2px 5px); }
+table.cyc { width: 100%; border-collapse: collapse; font-size: .9rem; margin-top: 8px; }
+table.cyc th, table.cyc td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+table.cyc th { color: var(--muted); font-weight: 500; }
+table.cyc tr.rapid td { color: var(--danger); }

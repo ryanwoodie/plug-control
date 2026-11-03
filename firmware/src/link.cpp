@@ -217,8 +217,13 @@ static bool mqttConnect() {
     Serial.printf("[link] mqtt connect failed state=%d\n", mqtt.state());
     return false;
   }
-  if (!mqtt.sessionPresent()) {
+  // A resumed session keeps the old subscriptions, so also subscribe when
+  // the list changed (a firmware update added a topic).
+  String sig;
+  for (auto &t : subs) sig += t + " ";
+  if (!mqtt.sessionPresent() || store.getString("subs", "") != sig) {
     for (auto &t : subs) mqtt.subscribe(t.c_str(), 1);
+    store.putString("subs", sig);
   }
   dbgReconnects++;
   Serial.printf("[link] mqtt online (session %s)\n", mqtt.sessionPresent() ? "resumed" : "new");

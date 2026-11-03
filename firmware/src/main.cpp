@@ -9,12 +9,13 @@
 #include <sys/time.h>
 #include "board.h"
 #include "crypto.h"
+#include "history.h"
 #include "kasa.h"
 #include "link.h"
 #include "secrets.h"
 #include "shelly.h"
 
-#define FW_VERSION "1.0"
+#define FW_VERSION "1.1"
 
 struct Rule {
   uint8_t days;    // bit 0 = Sunday
@@ -38,7 +39,7 @@ struct Plug {
   time_t timerEnd = 0;
   char src = '-';  // what last switched it: s=schedule m=manual t=timer b=button/local
   bool prevWant = false, schedPending = false;
-  uint32_t lastCmdMs = 0;
+  uint32_t lastCmdMs = 0, lastPollMs = 0;
   bool kasa() const { return def->type == 'k'; }
 };
 
@@ -147,8 +148,9 @@ static bool pollKasa(Plug &p, ShellyStatus &st) {
 static void pollPlug(Plug &p) {
   ShellyStatus st;
   if (!(p.kasa() ? pollKasa(p, st) : shellyGetStatus(p.ip, st))) {
-    if (p.reachable && ++p.misses >= 8) {  // ~1 min of silence
+    if (p.reachable && ++p.misses >= 30) {  // ~1 min of silence
       p.reachable = false;
+      histSample(&p - plugs, false, false, 0);
       markDirty(p.def->owner, DIRTY_LAZY);
       Serial.printf("[plug] %s unreachable\n", p.def->mac);
     }
@@ -175,6 +177,7 @@ static void pollPlug(Plug &p) {
   p.watts = st.watts;
   p.volts = st.volts;
   p.wh = st.wh;
+  histSample(&p - plugs, true, st.on, p.kasa() ? -1 : st.watts);
 }
 
 // ---- scheduler -------------------------------------------------------------
@@ -255,6 +258,7 @@ static void handleInbound() {
   String topic;
   std::vector<uint8_t> data;
   while (linkReceive(topic, data)) {
+    if (histInbound(topic, data.data(), data.size())) continue;
     for (uint8_t i = 0; i < OWNER_COUNT; i++) {
       Owner &o = owners[i];
       if (topic != o.topicC && topic != o.topicX) continue;
@@ -502,6 +506,8 @@ void setup() {
     if (!plugs[i].kasa()) plugs[i].ip = "192.168.4." + String(PLUG_IP_BASE + i);
     plugs[i].hardened = prefs.getBool(("h" + String(PLUGS[i].mac)).c_str(), false);
   }
+  histBegin(&prefs);
+  for (auto &t : histTopics()) subs.push_back(t);
   for (uint8_t i = 0; i < OWNER_COUNT; i++) {
     String c = prefs.getString(("c" + String(i)).c_str(), "");
     if (c.length()) loadConfig(i, c, false);
@@ -525,10 +531,18 @@ void loop() {
   readGps();
   handleInbound();
 
-  if (millis() - lastPoll > 4000) {
+  // Each plug every 2 s for history (it is all local Wi-Fi); plugs that are
+  // not answering every 10 s, since each try blocks for the timeout.
+  if (millis() - lastPoll > 250) {
     lastPoll = millis();
-    pollPlug(plugs[next]);
-    next = (next + 1) % PLUG_COUNT;
+    for (int k = 0; k < PLUG_COUNT; k++) {
+      Plug &p = plugs[(next + k) % PLUG_COUNT];
+      if (millis() - p.lastPollMs < (p.reachable ? 2000UL : 10000UL)) continue;
+      p.lastPollMs = millis();
+      pollPlug(p);
+      next = (next + k + 1) % PLUG_COUNT;
+      break;
+    }
   }
   if (millis() - lastSched > 15000) {
     lastSched = millis();
@@ -536,5 +550,6 @@ void loop() {
   }
   provisionMissing();
   reportStatus();
+  histLoop();
   delay(5);
 }

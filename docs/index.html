@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Plug Control</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%232563eb' d='M7 2v6H5v5a7 7 0 0 0 6 6.9V22h2v-2.1A7 7 0 0 0 19 13V8h-2V2h-2v6H9V2z'/></svg>">
-  <link rel="stylesheet" href="style.css?v=4">
+  <link rel="stylesheet" href="style.css?v=5">
   <script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
 </head>
 <body>
@@ -30,6 +30,7 @@
       <div id="banner" class="banner" hidden></div>
       <div id="offline" class="banner warn" hidden></div>
       <div id="plugs"></div>
+      <div id="history" hidden></div>
       <section class="card" id="device">
         <div class="row between">
           <h2>Controller</h2>
@@ -114,6 +115,7 @@
     </form>
   </dialog>
 
-  <script src="app.js?v=4"></script>
+  <script src="app.js?v=5"></script>
+  <script src="history.js?v=1"></script>
 </body>
 </html>

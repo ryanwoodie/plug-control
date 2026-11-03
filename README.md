@@ -26,8 +26,9 @@ Remote control for Shelly and TP-Link Kasa smart plugs over a 1NCE IoT SIM, buil
 ## Features (web app)
 
 On / Off / Timer, repeating schedules (days + start + duration), one-time
-runs, plug rename, optional auto-off for manual "On", site time zone, live
-watts/volts/kWh, cell signal, SIM data estimate, and GPS location.
+runs, on/off rotations, plug rename, optional auto-off for manual "On", site
+time zone, live watts/volts/kWh, cell signal, SIM data estimate, GPS location,
+and a per-plug history page (below).
 
 There is also an on-site page at `http://192.168.4.1` for anyone joined to
 the controller's Wi-Fi, which works with no cell service.
@@ -46,6 +47,7 @@ ACK, which is cheaper than an MQTT ping; MQTT pings run hourly as a backstop.
 | Heartbeat status (2 owners, every 6 h) | ~3.5 KB |
 | Each command or settings change + reply | ~1 KB |
 | Reconnect after a dropped session (persistent session, no re-download) | <1 KB |
+| Plug history (per plug; 0.5 KB idle, ~25 KB if a heater cycles every 10 s all day) | 1–5 KB |
 
 Roughly 35–40 KB/day idle, about 14 MB a year or ~140 MB over 10 years. The
 1NCE portal (SIM quota) shows the real figure.
@@ -90,6 +92,34 @@ countdown, which needs its clock set. The board sets the clock whenever the
 plug restarts, and also switches the plug off then, since Kasa plugs come
 back on after a power cut.
 
+## Plug history
+
+Firmware 1.1 polls each plug every 2 s over the local Wi-Fi and records only
+changes (drawing starts/stops, power moves >10% and >5 W, relay on/off, plug
+unreachable), so a steady load costs nothing and rapid cycling shows every
+cycle to the second. Each plug's changes go out about hourly (every 6 h if
+nothing happened) as one sealed batch to the retained topic
+`plugctl/<tid>/h/<seq>`, once.
+
+The GitHub Action `.github/workflows/history.yml` runs hourly. It files new
+batches, still sealed, into `history/<tid>/<YYYY-MM>.txt` on the `history`
+branch, clears them from the broker, and asks the controller for any missing
+seq on `plugctl/<tid>/hr`. The controller keeps ~48 KB of recent batches for
+that. The Action holds only the per-owner history keys (GitHub secret
+`HISTORY_KEYS`, value in `secrets/history_keys.json`): they authenticate
+resend requests but cannot read the batches. The web app's History page
+(plug card → History) reads the files from GitHub plus any batches still on
+the broker, so viewing history uses no SIM data.
+
+Kasa plugs have no meter: their history shows relay on/off only.
+
+GitHub pauses scheduled workflows in public repos after 60 days without
+repository activity. The Action commits every run, which should count; if it
+is ever paused, re-enable it under Actions. The controller resends what the
+collector reports missing, up to its backlog.
+
+Tests: `c++ -std=c++17 -I firmware/src tools/test_histlog.cpp -o /tmp/t && /tmp/t`.
+
 ## Layout
 
 - `firmware/`: PlatformIO project for the LilyGo T-A7670G (ESP32)
@@ -97,10 +127,12 @@ back on after a power cut.
   - `src/link.cpp`: modem, MQTT session, data meter and caps
   - `src/shelly.cpp`: Shelly Gen2+ RPC and provisioning
   - `src/kasa.cpp`: Kasa local protocol (port 9999) and provisioning
+  - `src/histlog.h`, `src/history.cpp`: plug history change log and batches
   - `src/crypto.cpp`: AES-GCM message sealing
   - `lib/`: LilyGo's TinyGSM fork and PubSubClient
 - `docs/`: the web app (served by GitHub Pages)
 - `tools/make_secrets.py`: key and password generator
+- `tools/collect_history.py`: the history collector run by the GitHub Action
 
 ## Changing the broker
 

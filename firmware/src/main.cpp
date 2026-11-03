@@ -10,21 +10,26 @@
 #include "board.h"
 #include "crypto.h"
 #include "history.h"
+#include "sched.h"
+#include "fwupdate.h"
 #include "kasa.h"
 #include "link.h"
 #include "secrets.h"
 #include "shelly.h"
 
-#define FW_VERSION "1.1"
+#define FW_VERSION "1.2"
 
+// on/off (minutes), both set: rotate within the window (see sched.h).
 struct Rule {
   uint8_t days;    // bit 0 = Sunday
   uint16_t start;  // minutes after local midnight
   uint16_t dur;    // minutes
+  uint16_t on, off;
 };
 struct OneOff {
   uint32_t at;  // UTC start
   uint16_t dur;
+  uint16_t on, off;
 };
 
 struct Plug {
@@ -37,6 +42,9 @@ struct Plug {
   float watts = 0, volts = 0, wh = 0;
   uint8_t misses = 0;
   time_t timerEnd = 0;
+  time_t cycleEnd = 0;  // end of the rotation window it is in, 0 = not rotating
+  time_t stopUntil = 0;  // a manual Off stopped the rotation until then
+  uint32_t followMs = 0;  // when to send a report with the load's real draw
   char src = '-';  // what last switched it: s=schedule m=manual t=timer b=button/local
   bool prevWant = false, schedPending = false;
   uint32_t lastCmdMs = 0, lastPollMs = 0;
@@ -99,10 +107,12 @@ static void loadConfig(uint8_t oi, const String &json, bool persist) {
     p.rules.clear();
     for (JsonObject r : c["r"].as<JsonArray>()) {
       if (!(r["e"] | 1)) continue;
-      p.rules.push_back({(uint8_t)(r["d"] | 0), (uint16_t)(r["s"] | 0), (uint16_t)(r["m"] | 0)});
+      p.rules.push_back({(uint8_t)(r["d"] | 0), (uint16_t)(r["s"] | 0), (uint16_t)(r["m"] | 0),
+                         (uint16_t)(r["on"] | 0), (uint16_t)(r["off"] | 0)});
     }
     p.ones.clear();
-    for (JsonObject r : c["o"].as<JsonArray>()) p.ones.push_back({r["at"] | 0u, (uint16_t)(r["m"] | 0)});
+    for (JsonObject r : c["o"].as<JsonArray>())
+      p.ones.push_back({r["at"] | 0u, (uint16_t)(r["m"] | 0), (uint16_t)(r["on"] | 0), (uint16_t)(r["off"] | 0)});
     p.prevWant = false;  // re-evaluate against the new schedule
   }
   if (persist) prefs.putString(("c" + String(oi)).c_str(), json);
@@ -121,8 +131,14 @@ static bool setPlug(Plug &p, bool on, uint32_t secs, char src) {
   if (p.ip.isEmpty() || !(p.kasa() ? kasaSet(p.ip, on, secs) : shellySet(p.ip, on, secs))) return false;
   p.on = on;
   p.src = src;
+  if (!on && src == 'm' && p.cycleEnd) p.stopUntil = p.cycleEnd;  // Off ends this rotation run
   p.timerEnd = (on && secs && timeValid()) ? time(nullptr) + secs : 0;
-  markDirty(p.def->owner);
+  // Rotation switches ride along with later reports (the web app shows
+  // "rotating"); everything else is reported now, and a switch-on again a
+  // minute later so the app sees the load's actual draw.
+  bool rotating = src == 's' && p.cycleEnd;
+  markDirty(p.def->owner, rotating ? DIRTY_LAZY : DIRTY_URGENT);
+  p.followMs = on && !rotating && !p.kasa() ? (millis() + 60000) | 1 : 0;
   Serial.printf("[plug] %s %s %lus (%c)\n", p.def->mac, on ? "ON" : "OFF", (unsigned long)secs, src);
   return true;
 }
@@ -169,20 +185,29 @@ static void pollPlug(Plug &p) {
     prefs.putBool(("h" + String(p.def->mac)).c_str(), true);
   }
   if (st.on != p.on) {
-    if (millis() - p.lastCmdMs > 5000) p.src = 'b';  // not us: button or the plug's own timer
+    // The plug's own countdown (set by us) switching it off is expected;
+    // anything else that we did not just command was a button press.
+    bool timedOff = !st.on && p.timerEnd && labs((long)(time(nullptr) - p.timerEnd)) <= 20;
+    if (!timedOff && millis() - p.lastCmdMs > 5000) p.src = 'b';
     if (!st.on) p.timerEnd = 0;
-    markDirty(p.def->owner);
+    markDirty(p.def->owner, timedOff && p.cycleEnd ? DIRTY_LAZY : DIRTY_URGENT);
   }
   p.on = st.on;
   p.watts = st.watts;
   p.volts = st.volts;
   p.wh = st.wh;
+  if (p.followMs && (int32_t)(millis() - p.followMs) >= 0) {
+    p.followMs = 0;
+    if (p.on) markDirty(p.def->owner, DIRTY_URGENT | DIRTY_FORCE);  // watts aren't in the signature
+  }
   histSample(&p - plugs, true, st.on, p.kasa() ? -1 : st.watts);
 }
 
 // ---- scheduler -------------------------------------------------------------
-// Returns the UTC time the current schedule window ends, or 0 if none active.
-static time_t scheduleEnd(const Plug &p, time_t now) {
+// Returns when the plug's current on period ends, or 0 if it should be off.
+// *cycleEnd: end of the rotation window it is in (even in an off phase), or 0.
+static time_t scheduleEnd(const Plug &p, time_t now, time_t *cycleEnd) {
+  *cycleEnd = 0;
   setenv("TZ", owners[p.def->owner].tz.c_str(), 1);
   tzset();
   struct tm lt;
@@ -195,16 +220,18 @@ static time_t scheduleEnd(const Plug &p, time_t now) {
       if (!(r.days & (1 << day))) continue;
       int start = r.start - back * 1440;
       if (nowMin >= start && nowMin < start + r.dur) {
-        time_t e = now + (start + r.dur - nowMin) * 60 - lt.tm_sec;
+        time_t we = now + (start + r.dur - nowMin) * 60 - lt.tm_sec, ws = we - r.dur * 60;
+        if (r.on && r.off && we > *cycleEnd) *cycleEnd = we;
+        time_t e = windowOnUntil(ws, we, r.on, r.off, now);
         if (e > end) end = e;
       }
     }
   }
   for (auto &o : p.ones) {
-    if (now >= (time_t)o.at && now < (time_t)o.at + o.dur * 60) {
-      time_t e = o.at + o.dur * 60;
-      if (e > end) end = e;
-    }
+    time_t ws = o.at, we = ws + o.dur * 60;
+    if (o.on && o.off && now >= ws && now < we && we > *cycleEnd) *cycleEnd = we;
+    time_t e = windowOnUntil(ws, we, o.on, o.off, now);
+    if (e > end) end = e;
   }
   return end;
 }
@@ -213,7 +240,11 @@ static void runSchedules() {
   if (!timeValid()) return;
   time_t now = time(nullptr);
   for (auto &p : plugs) {
-    time_t end = scheduleEnd(p, now);
+    time_t cyc;
+    time_t end = scheduleEnd(p, now, &cyc);
+    if (now < p.stopUntil) end = cyc = 0;
+    if ((cyc != 0) != (p.cycleEnd != 0)) markDirty(p.def->owner);  // rotation started or ended
+    p.cycleEnd = cyc;
     bool want = end > now;
     if (want && !p.prevWant) p.schedPending = true;
     if (!want) {
@@ -308,6 +339,7 @@ static String buildStatus(uint8_t oi) {
     }
     j["te"] = (uint32_t)p.timerEnd;
     j["s"] = String(p.src);
+    if (p.cycleEnd) j["cy"] = (uint32_t)p.cycleEnd;
   }
   JsonObject n = d["net"].to<JsonObject>();
   n["csq"] = li.csq;
@@ -333,7 +365,10 @@ static String stateSignature(uint8_t oi) {
   if (!owners[oi].seen.empty()) s += owners[oi].seen.back();
   for (auto &p : plugs) {
     if (p.def->owner != oi) continue;
-    s += "|" + String(p.def->mac) + (p.reachable ? "1" : "0") + (p.on ? "1" : "0") + p.src + String((uint32_t)p.timerEnd);
+    s += "|" + String(p.def->mac) + (p.reachable ? "1" : "0");
+    // While rotating, its on/off flips are not news: the app shows "rotating".
+    if (p.cycleEnd) s += "cy" + String((uint32_t)p.cycleEnd);
+    else s += (p.on ? "1" : "0") + String(p.src) + String((uint32_t)p.timerEnd);
   }
   return s;
 }
@@ -454,6 +489,7 @@ static void setupWeb() {
     LinkInfo li = linkInfo();
     h += "<p>Cell: " + String(li.online ? "online" : "offline") + ", CSQ " + li.csq + ", today ~" +
          String(li.today / 1024.0, 1) + " KB, month ~" + String(li.month / 1024.0, 1) + " KB</p>";
+    h += "<p>Firmware " FW_VERSION " &middot; <a href='/update'>Update firmware</a></p>";
     web.send(200, "text/html", h);
   });
   web.on("/set", [] {
@@ -519,6 +555,7 @@ void setup() {
   WiFi.softAP(AP_SSID, AP_PASS, 6, 0, 8);
   Serial.printf("[wifi] AP %s up\n", AP_SSID);
   setupWeb();
+  updateSetup(web, FW_VERSION);
 
   linkBegin(subs);
 }
@@ -544,12 +581,13 @@ void loop() {
       break;
     }
   }
-  if (millis() - lastSched > 15000) {
+  if (millis() - lastSched > 5000) {  // rotations switch within ~5 s
     lastSched = millis();
     runSchedules();
   }
   provisionMissing();
   reportStatus();
   histLoop();
+  updateLoop();
   delay(5);
 }

@@ -98,13 +98,23 @@ function connect() {
     let msg;
     try { msg = await open(topic, new Uint8Array(payload)); } catch { return; }
     gotAnything = true;
-    if (topic === session.topics.s) { status = msg; if (pendingCfg && msg.cv >= pendingCfg) pendingCfg = 0; }
+    if (topic === session.topics.s) onStatus(msg);
     else if (topic === session.topics.c) { if (!config || msg.v >= config.v) config = msg; }
     else if (topic === session.topics.x) { cmds = msg; }
     else if (topic.startsWith(histBase() + 'h/')) { histAdd(msg); if (!$('history').hidden) histDraw(false); return; }
     setBanner(null);
     render();
   });
+}
+
+function onStatus(msg) {
+  status = msg;
+  if (pendingCfg && msg.cv >= pendingCfg) pendingCfg = 0;
+  // Keep rotations in the form this controller's firmware runs.
+  if (config && !pendingCfg && msg.fw) {
+    const cfg = baseConfig();
+    if (compactRot() ? compactRotations(cfg) : expandRotations(cfg)) saveConfig(cfg);
+  }
 }
 
 async function publish(kind, obj) {
@@ -209,6 +219,81 @@ function expandRule(c) {
 const expandOnce = (c) => cycleWindows(c.m, c.on, c.off).map(([t, m]) => ({ at: c.at + t * 60, m, g: c.g }));
 const nextG = (pc) => 1 + Math.max(0, ...(pc.rc || []).map((c) => c.g), ...(pc.oc || []).map((c) => c.g));
 const fmtCycle = (c) => `${fmtDur(c.on)} on / ${fmtDur(c.off)} off`;
+const isRot = (x) => !!(x.on && x.off);
+
+// Firmware 1.2+ runs rotations itself: one entry with on/off, no windows.
+function fwAtLeast(v) {
+  const a = String(status?.fw || '0').split('.').map(Number), b = v.split('.').map(Number);
+  for (let i = 0; i < b.length; i++) if ((a[i] || 0) !== b[i]) return (a[i] || 0) > b[i];
+  return true;
+}
+const compactRot = () => fwAtLeast('1.2');
+
+// Rotations saved for older firmware (definition + expanded windows) become
+// single entries. Returns whether anything changed.
+function compactRotations(cfg) {
+  let changed = false;
+  for (const pc of Object.values(cfg.p || {})) {
+    for (const c of pc.rc || []) {
+      pc.r = pc.r.filter((x) => x.g !== c.g);
+      pc.r.push({ nm: c.nm, d: c.d, s: c.s, m: c.m, e: c.ho ? 1 : c.e, on: c.on, off: c.off });
+      changed = true;
+    }
+    for (const c of pc.oc || []) {
+      pc.o = (pc.o || []).filter((x) => x.g !== c.g);
+      pc.o.push({ at: c.at, m: c.m, on: c.on, off: c.off });
+      changed = true;
+    }
+    delete pc.rc;
+    delete pc.oc;
+  }
+  return changed;
+}
+
+// The reverse, for a controller back on older firmware (e.g. after switching
+// back on the update page), which would run an on/off entry as one long
+// on-window.
+function expandRotations(cfg) {
+  let changed = false;
+  for (const pc of Object.values(cfg.p || {})) {
+    for (const r of [...(pc.r || [])]) {
+      if (r.g || !isRot(r)) continue;
+      const c = { g: nextG(pc), nm: r.nm, d: r.d, s: r.s, m: r.m, e: r.e, on: r.on, off: r.off };
+      pc.r = pc.r.filter((x) => x !== r);
+      (pc.rc ||= []).push(c);
+      pc.r.push(...expandRule(c));
+      changed = true;
+    }
+    for (const o of [...(pc.o || [])]) {
+      if (o.g || !isRot(o)) continue;
+      const c = { g: nextG(pc), at: o.at, m: o.m, on: o.on, off: o.off };
+      pc.o = pc.o.filter((x) => x !== o);
+      (pc.oc ||= []).push(c);
+      pc.o.push(...expandOnce(c));
+      changed = true;
+    }
+  }
+  // Too big for older firmware: turn the largest rotations off (kept, marked
+  // ho: "held off"), rather than leave anything it would misread.
+  const held = [];
+  const size = () => enc.encode(JSON.stringify(cfg)).length;
+  while (size() > CFG_MAX_BYTES) {
+    let big = null;
+    for (const pc of Object.values(cfg.p || {}))
+      for (const c of [...(pc.rc || []), ...(pc.oc || [])]) {
+        const n = (pc.r || []).concat(pc.o || []).filter((x) => x.g === c.g).length;
+        if (n && (!big || n > big.n)) big = { pc, c, n };
+      }
+    if (!big) break;
+    big.pc.r = (big.pc.r || []).filter((x) => x.g !== big.c.g);
+    big.pc.o = (big.pc.o || []).filter((x) => x.g !== big.c.g);
+    big.c.ho = 1;
+    if ('e' in big.c) big.c.e = 0;
+    held.push(big.c.nm || 'a one-time rotation');
+  }
+  if (held.length) setBanner(`The controller is on older firmware that can't run ${held.join(', ')}, so it is switched off for now. Update the controller to run it again.`, 'warn');
+  return changed;
+}
 
 // Shows the on/off pickers when "Cycle on and off" is ticked.
 function cycleControls(prefix, c) {
@@ -218,8 +303,10 @@ function cycleControls(prefix, c) {
   cyc.checked = !!c;
   const info = () => {
     const n = cycleWindows(+$(prefix + 'Dur').value, +$(prefix + 'On').value, +$(prefix + 'Off').value).length;
-    // Each switch sends one status report over the SIM.
-    $(prefix + 'CycInfo').textContent = `${n} on-periods per run, about ${kb(n * 2 * REPORT_BYTES)} of SIM data per run.`;
+    $(prefix + 'CycInfo').textContent = compactRot()
+      ? `${n} on-periods per run. The controller switches them itself and reports only that it is rotating, so this uses almost no SIM data.`
+      // Each switch sends one status report over the SIM.
+      : `${n} on-periods per run, about ${kb(n * 2 * REPORT_BYTES)} of SIM data per run.`;
   };
   for (const k of ['Dur', 'On', 'Off']) $(prefix + k).onchange = info;
   cyc.onchange = () => {
@@ -260,26 +347,30 @@ function plugCard(mac, s, pc) {
   const pend = pendingFor(mac);
   const stateCls = !s.ok ? 'unknown' : s.on ? 'on' : 'off';
   // Highlight the button matching the reported state; neither when unknown.
-  const isOn = !!(status && s.ok && s.on), isOff = !!(status && s.ok && !s.on);
-  const stateTxt = !status ? '—' : !s.ok ? 'Unreachable' : s.on ? 'On' : 'Off';
-  const timer = s.on && s.te > nowS() ? `<span class="pill">off at ${fmtTime(s.te)}</span>` : '';
-  const via = s.ok && SRC[s.s] ? `<span class="muted small">${s.on ? 'turned on' : 'turned off'} ${SRC[s.s]}</span>` : '';
+  // While rotating, the last reported on/off may be minutes old: show neither.
+  const rotating = s.ok && s.cy > nowS();
+  const isOn = !!(status && s.ok && s.on && !rotating), isOff = !!(status && s.ok && !s.on && !rotating);
+  const stateTxt = !status ? '—' : !s.ok ? 'Unreachable' : rotating ? 'Rotating' : s.on ? 'On' : 'Off';
+  const timer = rotating ? `<span class="pill">until ${fmtTime(s.cy)}</span>`
+    : s.on && s.te > nowS() ? `<span class="pill">off at ${fmtTime(s.te)}</span>` : '';
+  const via = rotating ? '<span class="muted small">switching on and off by schedule · Off stops this run</span>'
+    : s.ok && SRC[s.s] ? `<span class="muted small">${s.on ? 'turned on' : 'turned off'} ${SRC[s.s]}</span>` : '';
   const pendTxt = pend.length ? `<p class="pending">Sending “${pend.at(-1).a === 'tmr' ? 'timer' : pend.at(-1).a}” to the controller…</p>` : '';
   const ruleLi = (r, data, cyc) => `
       <li class="${r.e === 0 ? 'disabled' : ''}">
         <button class="link" data-act="editRule" data-mac="${mac}" ${data}>
-          <b>${esc(r.nm || 'Schedule')}</b> · ${fmtDays(r.d)} · ${fmtHM(r.s)} for ${fmtDur(r.m)}${cyc ? ', cycling ' + fmtCycle(r) : ''}${r.e === 0 ? ' (off)' : ''}
+          <b>${esc(r.nm || 'Schedule')}</b> · ${fmtDays(r.d)} · ${fmtHM(r.s)} for ${fmtDur(r.m)}${cyc ? ', cycling ' + fmtCycle(r) : ''}${r.ho ? ' (off until the controller is updated)' : r.e === 0 ? ' (off)' : ''}
         </button>
       </li>`;
   const rules = [
-    ...(pc.r || []).map((r, i) => (r.g ? '' : ruleLi(r, `data-i="${i}"`, false))),
+    ...(pc.r || []).map((r, i) => (r.g ? '' : ruleLi(r, `data-i="${i}"`, isRot(r)))),
     ...(pc.rc || []).map((c) => ruleLi(c, `data-g="${c.g}"`, true)),
   ].join('');
   const onceLi = (o, data, cyc) => `
-      <li><span>${fmtTime(o.at)} for ${fmtDur(o.m)}${cyc ? ', cycling ' + fmtCycle(o) : ''}</span>
+      <li><span>${fmtTime(o.at)} for ${fmtDur(o.m)}${cyc ? ', cycling ' + fmtCycle(o) : ''}${o.ho ? ' (off until the controller is updated)' : ''}</span>
         <button class="link danger" data-act="delOnce" data-mac="${mac}" ${data}>Remove</button></li>`;
   const ones = [
-    ...(pc.o || []).filter((o) => !o.g && o.at + o.m * 60 > nowS()).map((o) => onceLi(o, `data-at="${o.at}"`, false)),
+    ...(pc.o || []).filter((o) => !o.g && o.at + o.m * 60 > nowS()).map((o) => onceLi(o, `data-at="${o.at}"`, isRot(o))),
     ...(pc.oc || []).filter((c) => c.at + c.m * 60 > nowS()).map((c) => onceLi(c, `data-g="${c.g}"`, true)),
   ].join('');
   return `
@@ -362,13 +453,14 @@ async function editRule(mac, i, g) {
   const isNew = i == null && g == null;
   const rot = g != null ? pc.rc.find((c) => c.g === g) : null;
   const r = isNew ? { d: 127, s: 360, m: 120, e: 1, nm: '' } : rot || pc.r[i];
+  const cur = rot || (!isNew && isRot(r) ? r : null);
   $('ruleTitle').textContent = isNew ? 'New schedule' : 'Edit schedule';
   $('ruleName').value = r.nm || '';
   $('ruleDays').innerHTML = DAYS.map((d, k) =>
     `<label class="chip"><input type="checkbox" value="${k}" ${r.d & (1 << k) ? 'checked' : ''}><span>${d}</span></label>`).join('');
   $('ruleStart').value = fmtHM(r.s);
   durOptions($('ruleDur'), RUN_DURS, RUN_DURS.includes(r.m) ? r.m : 120);
-  cycleControls('rule', rot);
+  cycleControls('rule', cur);
   $('ruleEn').checked = r.e !== 0;
   $('ruleDelete').hidden = isNew;
   const res = await ask($('ruleDlg'));
@@ -384,7 +476,9 @@ async function editRule(mac, i, g) {
   const [hh, mm] = $('ruleStart').value.split(':').map(Number);
   const nr = { nm: $('ruleName').value.trim(), d: days, s: hh * 60 + mm, m: +$('ruleDur').value, e: $('ruleEn').checked ? 1 : 0 };
   const cyc = readCycle('rule');
-  if (cyc) {
+  if (cyc && compactRot()) {
+    pc.r.push({ ...nr, ...cyc });
+  } else if (cyc) {
     const c = { g: rot?.g || nextG(pc), ...nr, ...cyc };
     (pc.rc ||= []).push(c);
     pc.r.push(...expandRule(c));
@@ -406,7 +500,9 @@ async function addOnce(mac) {
   const cfg = baseConfig();
   const pc = plugCfg(cfg, mac);
   const m = +$('onceDur').value, cyc = readCycle('once');
-  if (cyc) {
+  if (cyc && compactRot()) {
+    pc.o = [...(pc.o || []), { at, m, ...cyc }];
+  } else if (cyc) {
     const c = { g: nextG(pc), at, m, ...cyc };
     (pc.oc ||= []).push(c);
     pc.o = [...(pc.o || []), ...expandOnce(c)];

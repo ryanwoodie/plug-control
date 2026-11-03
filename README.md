@@ -33,6 +33,33 @@ and a per-plug history page (below).
 There is also an on-site page at `http://192.168.4.1` for anyone joined to
 the controller's Wi-Fi, which works with no cell service.
 
+**Rotations** ("on 15 min, off 45 min, for 4 h", in repeating or one-time
+schedules): firmware 1.2+ runs them itself from one schedule entry, and
+reports only that the plug is rotating (and until when), not each switch, so
+even 5 on / 5 off all day costs almost no SIM data; the History page shows
+every switch. Pressing Off during a rotation stops that run. For older
+firmware the web app saves a rotation as its individual on-periods (about 50
+per plug fit) and converts in either direction when the controller's
+firmware version changes. A rotation too big for older firmware is switched
+off until the controller is updated.
+
+After a plug is switched on (other than by a rotation), firmware 1.2 sends a
+second report about a minute later so the app shows the load's real draw.
+
+## Updating the firmware from a phone
+
+From firmware 1.2: join the controller's Wi-Fi, open
+`http://192.168.4.1/update`, pick `firmware.bin`, enter the update PIN (in
+`secrets/credentials.txt`) and tap Install. Build the file with
+`cd firmware && pio run`; it is `firmware/.pio/build/t-a7670/firmware.bin`.
+It contains the owner keys and Wi-Fi password, so send it privately and never
+commit or publish it.
+
+A new firmware is on trial until it has run 2 minutes with the cell link up
+(or 10 minutes without). If it crashes or hangs before that, the bootloader
+starts the previous firmware again by itself. The page also has a button to
+switch back to the previous firmware.
+
 ## Expected data use
 
 The 1NCE path drops idle TCP connections after 5.5–6 minutes (measured:
@@ -118,7 +145,8 @@ repository activity. The Action commits every run, which should count; if it
 is ever paused, re-enable it under Actions. The controller resends what the
 collector reports missing, up to its backlog.
 
-Tests: `c++ -std=c++17 -I firmware/src tools/test_histlog.cpp -o /tmp/t && /tmp/t`.
+Tests: `c++ -std=c++17 -I firmware/src tools/test_histlog.cpp -o /tmp/t && /tmp/t`
+and the same for `tools/test_sched.cpp` (rotation timing).
 
 ## Layout
 
@@ -128,6 +156,8 @@ Tests: `c++ -std=c++17 -I firmware/src tools/test_histlog.cpp -o /tmp/t && /tmp/
   - `src/shelly.cpp`: Shelly Gen2+ RPC and provisioning
   - `src/kasa.cpp`: Kasa local protocol (port 9999) and provisioning
   - `src/histlog.h`, `src/history.cpp`: plug history change log and batches
+  - `src/sched.h`: rotation timing
+  - `src/fwupdate.cpp`: firmware update page and trial/rollback
   - `src/crypto.cpp`: AES-GCM message sealing
   - `lib/`: LilyGo's TinyGSM fork and PubSubClient
 - `docs/`: the web app (served by GitHub Pages)

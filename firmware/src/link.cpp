@@ -15,7 +15,7 @@ static TinyGsm modem(SerialAT);
 static TinyGsmClient gsm(modem, 0);
 static QueueHandle_t outQ, inQ;
 static SemaphoreHandle_t infoLock;
-static LinkInfo info{false, 99, "", 0, 0, 0, false};
+static LinkInfo info{false, 99, "", 0, 0, 0, false, false, {}};
 static std::vector<String> subs;
 static Preferences store;
 
@@ -28,12 +28,21 @@ static uint32_t dbgConn, dbgTx, dbgRx, dbgOvh, dbgReconnects, dbgPub, dbgRecv;
 
 static uint32_t lastTrafficMs = 0;
 
-static void meterAdd(uint32_t n) {
+// field: which DayUse counter the bytes belong to.
+static void meterAdd(uint32_t n, uint32_t DayUse::*field) {
   lastTrafficMs = millis();
   xSemaphoreTake(infoLock, portMAX_DELAY);
   info.today += n;
   info.month += n;
   info.total += n;
+  info.use.*field += n;
+  info.saving = info.today >= DAILY_RESERVE_BYTES || info.month >= MONTHLY_RESERVE_BYTES;
+  xSemaphoreGive(infoLock);
+}
+
+void linkCount(Usage u) {
+  xSemaphoreTake(infoLock, portMAX_DELAY);
+  info.use.n[u]++;
   xSemaphoreGive(infoLock);
 }
 
@@ -43,6 +52,7 @@ static void meterSave() {
   store.putUInt("today", info.today);
   store.putUInt("month", info.month);
   store.putUInt("total", info.total);
+  store.putBytes("use", &info.use, sizeof info.use);
   lastMeterSave = millis();
 }
 
@@ -55,8 +65,9 @@ static void meterRoll() {
   uint32_t mon = day / 100;
   if (day != meterDay || mon != meterMonth) {
     xSemaphoreTake(infoLock, portMAX_DELAY);
-    if (day != meterDay) info.today = 0;
+    if (day != meterDay) info.today = 0, info.use = DayUse{};
     if (mon != meterMonth) info.month = 0;
+    info.saving = info.today >= DAILY_RESERVE_BYTES || info.month >= MONTHLY_RESERVE_BYTES;
     xSemaphoreGive(infoLock);
     meterDay = day;
     meterMonth = mon;
@@ -68,11 +79,12 @@ static void meterRoll() {
 class MeteredClient : public Client {
  public:
   explicit MeteredClient(Client &c) : c(c) {}
-  int connect(IPAddress ip, uint16_t port) override { meterAdd(400); dbgConn += 400; return c.connect(ip, port); }
-  int connect(const char *host, uint16_t port) override { meterAdd(550); dbgConn += 550; return c.connect(host, port); }
+  int connect(IPAddress ip, uint16_t port) override { meterAdd(400, &DayUse::conn); dbgConn += 400; return c.connect(ip, port); }
+  int connect(const char *host, uint16_t port) override { meterAdd(550, &DayUse::conn); dbgConn += 550; return c.connect(host, port); }
   size_t write(uint8_t b) override { return write(&b, 1); }
   size_t write(const uint8_t *buf, size_t n) override {
-    meterAdd(n + 104);
+    meterAdd(n, &DayUse::tx);
+    meterAdd(104, &DayUse::pkt);
     dbgTx += n;
     dbgOvh += 104;
     return c.write(buf, n);
@@ -80,7 +92,7 @@ class MeteredClient : public Client {
   int available() override {
     int a = c.available();
     if (a > 0 && !burst) {
-      meterAdd(104);
+      meterAdd(104, &DayUse::pkt);
       dbgOvh += 104;
     }
     burst = a > 0;
@@ -89,7 +101,7 @@ class MeteredClient : public Client {
   int read() override {
     int r = c.read();
     if (r >= 0) {
-      meterAdd(1);
+      meterAdd(1, &DayUse::rx);
       dbgRx++;
     }
     return r;
@@ -97,7 +109,7 @@ class MeteredClient : public Client {
   int read(uint8_t *buf, size_t n) override {
     int r = c.read(buf, n);
     if (r > 0) {
-      meterAdd(r);
+      meterAdd(r, &DayUse::rx);
       dbgRx += r;
     }
     return r;
@@ -226,6 +238,10 @@ static bool mqttConnect() {
     store.putString("subs", sig);
   }
   dbgReconnects++;
+  xSemaphoreTake(infoLock, portMAX_DELAY);
+  info.use.sess++;
+  if (!mqtt.sessionPresent()) info.use.fresh++;
+  xSemaphoreGive(infoLock);
   Serial.printf("[link] mqtt online (session %s)\n", mqtt.sessionPresent() ? "resumed" : "new");
   return true;
 }
@@ -242,7 +258,7 @@ static void linkTask(void *) {
   uint32_t nextTry = 0, lastNetInfo = 0, lastTimeSync = 0;
   int fails = 0;
   bool dataOff = false, wasOnline = false;
-  uint32_t onlineSince = 0;
+  uint32_t onlineSince = 0, sessionGapMs = 0;
 
   while (!modemPowerOn()) {
     Serial.println("[link] modem not responding, retrying in 60s");
@@ -291,6 +307,10 @@ static void linkTask(void *) {
       if (wasOnline) {
         Serial.printf("[link] mqtt lost after %lus online (state=%d)\n", (millis() - onlineSince) / 1000, mqtt.state());
         wasOnline = false;
+        if (sessionGapMs) {
+          nextTry = millis() + sessionGapMs;
+          Serial.printf("[link] %d sessions this hour, next try in %lus\n", SESSIONS_PER_HOUR, sessionGapMs / 1000);
+        }
       }
       setOnline(false);
       if ((int32_t)(millis() - nextTry) < 0) {
@@ -320,6 +340,14 @@ static void linkTask(void *) {
         ok = modem.isGprsConnected() && mqttConnect();
       }
       if (ok) {
+        // A link that keeps dropping (or a broker that keeps forgetting us)
+        // costs a session setup each time: space them out past a few an hour.
+        static uint32_t recent[SESSIONS_PER_HOUR];
+        static uint8_t ri = 0;
+        uint32_t oldest = recent[ri];
+        recent[ri] = millis();
+        ri = (ri + 1) % SESSIONS_PER_HOUR;
+        sessionGapMs = oldest && millis() - oldest < 3600 * 1000UL ? 15 * 60 * 1000UL : 0;
         fails = 0;
         setOnline(true);
         wasOnline = true;
@@ -345,7 +373,7 @@ static void linkTask(void *) {
     mqtt.loop();
     // The modem's TCP keep-alive probes are invisible to us: count a probe
     // and its ACK (~104 B) for every keep-alive period with no traffic.
-    if (millis() - lastTrafficMs >= TCP_KEEPIDLE_MIN * 60000UL) meterAdd(104);
+    if (millis() - lastTrafficMs >= TCP_KEEPIDLE_MIN * 60000UL) meterAdd(104, &DayUse::ka);
     Msg *m;
     while (xQueueReceive(outQ, &m, 0) == pdTRUE) {
       mqtt.publish(m->topic.c_str(), m->data.data(), m->data.size(), true);
@@ -383,6 +411,8 @@ void linkBegin(const std::vector<String> &subscribeTopics) {
   info.today = store.getUInt("today");
   info.month = store.getUInt("month");
   info.total = store.getUInt("total");
+  if (store.getBytesLength("use") == sizeof info.use) store.getBytes("use", &info.use, sizeof info.use);
+  info.saving = info.today >= DAILY_RESERVE_BYTES || info.month >= MONTHLY_RESERVE_BYTES;
   // Idle priority: TinyGSM busy-waits (up to 75 s on a socket open) and would
   // otherwise starve IDLE0 and trip the task watchdog.
   xTaskCreatePinnedToCore(linkTask, "link", 12288, nullptr, tskIDLE_PRIORITY, nullptr, 0);

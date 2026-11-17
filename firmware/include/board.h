@@ -31,6 +31,13 @@
 #define HEARTBEAT_S (6 * 3600)             // unsolicited full status
 #define DAILY_CAP_BYTES (150UL * 1024)     // estimated; link goes quiet until tomorrow
 #define MONTHLY_CAP_BYTES (3000UL * 1024)  // estimated; link goes quiet until next month
+// Past these, optional traffic (refreshes, plug Wi-Fi blips, rotation
+// switches, history) is held back so commands still get through.
+#define DAILY_RESERVE_BYTES (100UL * 1024)
+#define MONTHLY_RESERVE_BYTES (2700UL * 1024)
+// More MQTT sessions than this in an hour and the next waits 15 minutes:
+// each fresh session re-downloads the retained settings (~2-4 KB).
+#define SESSIONS_PER_HOUR 4
 #define CMD_MAX_AGE_S 900                  // ignore manual commands older than this
 
 #define PLUG_IP_BASE 200  // plug n gets 192.168.4.(200+n)

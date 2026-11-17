@@ -22,6 +22,16 @@ Remote control for Shelly and TP-Link Kasa smart plugs over a 1NCE IoT SIM, buil
   nothing usable, and owners cannot see or control each other's plugs.
 - **Data guard.** The firmware estimates SIM usage and goes quiet for the rest
   of the day/month past 150 KB/day or 3 MB/month (`firmware/include/board.h`).
+  From firmware 1.2, past 100 KB/day (2.7 MB/month) it turns on a data saver
+  first: refreshes go unanswered, and plug Wi-Fi blips, rotation switches,
+  power follow-ups and history wait, so On/Off and timers keep working. A plug
+  that keeps dropping off Wi-Fi is reported at most every 20 minutes after 3
+  reports in an hour, and more than 4 MQTT sessions in an hour spaces the next
+  one 15 minutes out. The day runs midnight to midnight UTC (6 PM in
+  Saskatchewan). The device panel shows what today's data went on.
+- **Web app refresh.** The app asks for a fresh status by itself only once per
+  page load, while the page is on screen, and at most every 15 minutes per
+  browser; reconnecting to the broker never triggers it.
 
 ## Features (web app)
 

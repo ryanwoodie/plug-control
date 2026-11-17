@@ -63,6 +63,10 @@ struct Owner {
   std::vector<String> seen;  // recently applied command ids
   uint8_t dirty = DIRTY_FORCE;  // first report ~90 s after boot, once plugs have checked in
   uint32_t dirtyMs = 0;
+  uint8_t why = 0;  // Usage bits: what the pending report is for
+  bool heldNoted = false;
+  uint32_t lastReportMs = 0, plugWinMs = 0;
+  uint8_t plugReps = 0;  // reports only about plug Wi-Fi blips in the hour from plugWinMs
   String lastSig;  // state summary of the last report, to skip no-op reports
 };
 
@@ -86,9 +90,10 @@ void noteTime(time_t utc, const char *source) {
   timeSource = source;
 }
 
-static void markDirty(uint8_t owner, uint8_t level = DIRTY_URGENT) {
+static void markDirty(uint8_t owner, uint8_t level = DIRTY_URGENT, Usage why = U_CMD) {
   if (!owners[owner].dirty) owners[owner].dirtyMs = millis();
   owners[owner].dirty |= level;
+  owners[owner].why |= 1 << why;
 }
 
 // ---- owner config ----------------------------------------------------------
@@ -167,7 +172,7 @@ static void pollPlug(Plug &p) {
     if (p.reachable && ++p.misses >= 30) {  // ~1 min of silence
       p.reachable = false;
       histSample(&p - plugs, false, false, 0);
-      markDirty(p.def->owner, DIRTY_LAZY);
+      markDirty(p.def->owner, DIRTY_LAZY, U_PLUG);
       Serial.printf("[plug] %s unreachable\n", p.def->mac);
     }
     return;
@@ -176,7 +181,7 @@ static void pollPlug(Plug &p) {
   if (!p.reachable) {
     p.reachable = true;
     p.everSeen = true;
-    markDirty(p.def->owner, DIRTY_LAZY);
+    markDirty(p.def->owner, DIRTY_LAZY, U_PLUG);
     Serial.printf("[plug] %s online at %s\n", p.def->mac, p.ip.c_str());
     if (p.prevWant && !st.on && p.src == 's') p.schedPending = true;  // plug lost power mid-window
   }
@@ -198,7 +203,9 @@ static void pollPlug(Plug &p) {
   p.wh = st.wh;
   if (p.followMs && (int32_t)(millis() - p.followMs) >= 0) {
     p.followMs = 0;
-    if (p.on) markDirty(p.def->owner, DIRTY_URGENT | DIRTY_FORCE);  // watts aren't in the signature
+    // Watts aren't in the signature. Optional, so not past the data reserve.
+    if (p.on && linkInfo().saving) linkCount(U_HELD);
+    else if (p.on) markDirty(p.def->owner, DIRTY_URGENT | DIRTY_FORCE, U_FOLLOW);
   }
   histSample(&p - plugs, true, st.on, p.kasa() ? -1 : st.watts);
 }
@@ -267,8 +274,13 @@ static void handleCommands(uint8_t oi, JsonDocument &doc) {
     if (o.seen.size() > 12) o.seen.erase(o.seen.begin());
     changed = true;
     String a = c["a"] | "";
-    markDirty(oi, a == "ref" ? DIRTY_URGENT | DIRTY_FORCE : DIRTY_URGENT);
-    if (a == "ref") continue;
+    if (a == "ref") {
+      // Past the data reserve a refresh is not answered; the web app says so.
+      if (linkInfo().saving) linkCount(U_HELD);
+      else markDirty(oi, DIRTY_URGENT | DIRTY_FORCE, U_REF);
+      continue;
+    }
+    markDirty(oi);
     long age = timeValid() ? (long)(time(nullptr) - (time_t)(c["t"] | 0u)) : 0;
     if (labs(age) > CMD_MAX_AGE_S) {
       Serial.printf("[cmd] %s expired (%lds)\n", id.c_str(), age);
@@ -348,6 +360,16 @@ static String buildStatus(uint8_t oi) {
   n["m"] = li.month;
   n["tot"] = li.total;
   if (li.capped) n["cap"] = 1;
+  if (li.saving) n["sv"] = 1;
+  // Today's breakdown: [connect, sent, received, packet overhead, keep-alive]
+  // bytes, [sessions, fresh sessions], and message counts by Usage.
+  JsonArray ub = n["ub"].to<JsonArray>();
+  for (uint32_t v : {li.use.conn, li.use.tx, li.use.rx, li.use.pkt, li.use.ka}) ub.add(v);
+  JsonArray us = n["us"].to<JsonArray>();
+  us.add(li.use.sess);
+  us.add(li.use.fresh);
+  JsonArray un = n["un"].to<JsonArray>();
+  for (uint16_t v : li.use.n) un.add(v);
   d["ts"] = timeSource;
   if (gpsFix) {
     JsonArray g = d["gps"].to<JsonArray>();
@@ -377,9 +399,10 @@ static void reportStatus() {
   static uint32_t lastBeat = 0;
   if (millis() - lastBeat > HEARTBEAT_S * 1000UL) {
     lastBeat = millis();
-    for (uint8_t i = 0; i < OWNER_COUNT; i++) markDirty(i, DIRTY_LAZY | DIRTY_FORCE);
+    for (uint8_t i = 0; i < OWNER_COUNT; i++) markDirty(i, DIRTY_LAZY | DIRTY_FORCE, U_BEAT);
   }
-  if (!linkInfo().online) return;  // stay dirty until the link is up
+  LinkInfo li = linkInfo();
+  if (!li.online) return;  // stay dirty until the link is up
   for (uint8_t i = 0; i < OWNER_COUNT; i++) {
     Owner &o = owners[i];
     if (!o.dirty) continue;
@@ -387,13 +410,35 @@ static void reportStatus() {
     if (millis() - o.dirtyMs < wait) continue;
     String sig = stateSignature(i);
     if (!(o.dirty & DIRTY_FORCE) && sig == o.lastSig) {
-      o.dirty = 0;  // e.g. a plug dropped off Wi-Fi and came back: nothing to tell
+      o.dirty = o.why = 0;  // e.g. a plug dropped off Wi-Fi and came back: nothing to tell
       continue;
+    }
+    bool lazyOnly = !(o.dirty & (DIRTY_URGENT | DIRTY_FORCE));
+    // Past the data reserve, lazy news (plug blips, rotation switches) waits
+    // for the next heartbeat or command.
+    if (lazyOnly && li.saving) {
+      if (!o.heldNoted) linkCount(U_HELD), o.heldNoted = true;
+      continue;
+    }
+    // A plug that keeps dropping off Wi-Fi: after 3 reports about it in an
+    // hour, at most one every 20 minutes.
+    bool plugOnly = lazyOnly && o.why == (1 << U_PLUG);
+    if (plugOnly) {
+      if (millis() - o.plugWinMs > 3600 * 1000UL) o.plugWinMs = millis(), o.plugReps = 0;
+      if (o.plugReps >= 3 && millis() - o.lastReportMs < 20 * 60 * 1000UL) continue;
+      o.plugReps++;
     }
     std::vector<uint8_t> sealed;
     if (sealMsg(o.def->key, o.topicS, buildStatus(i), sealed)) linkPublish(o.topicS, std::move(sealed));
+    static const Usage order[] = {U_REF, U_CMD, U_FOLLOW, U_PLUG, U_BEAT};
+    Usage why = U_BEAT;  // the first report after boot has no other reason
+    for (Usage u : order)
+      if (o.why & (1 << u)) { why = u; break; }
+    linkCount(why);
     o.lastSig = sig;
-    o.dirty = 0;
+    o.lastReportMs = millis();
+    o.dirty = o.why = 0;
+    o.heldNoted = false;
   }
 }
 

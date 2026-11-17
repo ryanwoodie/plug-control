@@ -114,11 +114,14 @@ void histLoop() {
   }
   // One message per second at most, and only while the link is up, so a long
   // outage leaves batches here instead of overflowing the link's queue.
-  if (!linkInfo().online) return;
+  // Past the data reserve they wait here for tomorrow (the backlog holds days).
+  LinkInfo li = linkInfo();
+  if (!li.online || li.saving) return;
   for (auto &b : backlog) {
     if (!b.pending) continue;
     std::vector<uint8_t> copy = b.data;
     linkPublish(base(b.owner) + "h/" + b.seq, std::move(copy));
+    linkCount(U_HIST);
     b.pending = false;
     break;
   }

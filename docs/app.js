@@ -90,7 +90,7 @@ function connect() {
     setBanner(null);
     setTimeout(() => {
       if (!gotAnything) setBanner('No data for this login yet. Check the username and password. If they are right, the controller has not reported in yet.', 'warn');
-      else if (!status || nowS() - status.t > STALE_AFTER) refresh();
+      else maybeAutoRefresh();
     }, 6000);
   });
   client.on('offline', () => setBanner('Reconnecting to the message server…', 'warn'));
@@ -133,6 +133,25 @@ async function sendCmd(a, plug, extra = {}) {
   render();
 }
 const refresh = () => sendCmd('ref', '');
+
+// Ask for a fresh status by itself only once per page load, only while the page
+// is on screen, and at most every AUTO_REF_GAP per browser. Reconnects never
+// trigger it: a tab left open overnight could otherwise send one every few
+// minutes, and each costs the controller about 1 KB of cellular data.
+const AUTO_REF_GAP = 15 * 60;
+let autoRefDone = false;
+function maybeAutoRefresh() {
+  if (autoRefDone || !client?.connected || document.visibilityState !== 'visible') return;
+  if (status && nowS() - status.t <= STALE_AFTER) { autoRefDone = true; return; }
+  let last = 0;
+  try { last = +localStorage.getItem('plugctl.autoref') || 0; } catch {}
+  autoRefDone = true;
+  if (nowS() - last < AUTO_REF_GAP) return;
+  if ((cmds.q || []).some((c) => c.a === 'ref' && nowS() - c.t < CMD_MAX_AGE && !(status?.ax || []).includes(c.id))) return;
+  try { localStorage.setItem('plugctl.autoref', String(nowS())); } catch {}
+  refresh();
+}
+document.addEventListener('visibilitychange', () => { if (gotAnything) maybeAutoRefresh(); });
 
 function baseConfig() {
   if (config) return structuredClone(config);
@@ -412,14 +431,30 @@ function renderDevice() {
   const rows = [
     ['Last report', `${fmtAgo(status.t)} (${new Date(status.t * 1000).toLocaleString()})`],
     ['Cell signal', `${signal(n.csq)}${n.op ? ' · network ' + esc(n.op) : ''}`],
-    ['SIM data (est.)', `today ${kb(n.d || 0)} · this month ${kb(n.m || 0)} · all time ${kb(n.tot || 0)}${n.cap ? ' · <b>cap reached, paused</b>' : ''}`],
+    ['SIM data (est.)', `today ${kb(n.d || 0)} · this month ${kb(n.m || 0)} · all time ${kb(n.tot || 0)}${n.cap ? ' · <b>cap reached, paused</b>' : n.sv ? ' · <b>data saver on</b>: refreshes and minor updates paused until 6 PM; On/Off still work' : ''}`],
     ['Clock', status.ts || 'none'],
     ['Settings', pendingCfg ? 'saving… (waiting for controller)' : config ? 'up to date' : 'defaults'],
     ['Firmware', `${esc(status.fw)} · up ${Math.floor(status.up / 3600)} h`],
   ];
+  if (n.ub) rows.push(['Data today by kind', usageBreakdown(n)]);
   if (status.gps) rows.push(['Location', `<a href="https://maps.google.com/?q=${status.gps[0]},${status.gps[1]}" target="_blank" rel="noopener">${status.gps[0]}, ${status.gps[1]}</a>`]);
   d.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
   $('tz').value = (config || baseConfig()).tz;
+}
+
+// Firmware 1.2+: what today's data went on (UTC day, resets 6 PM local).
+function usageBreakdown(n) {
+  const [conn, tx, rx, pkt, ka] = n.ub;
+  const [sess, fresh] = n.us || [0, 0];
+  const [ref, cmd, fol, plug, beat, hist, held] = n.un || [];
+  const parts = [
+    `connecting ${kb(conn)} (${sess} session${sess === 1 ? '' : 's'}${fresh ? `, ${fresh} fresh` : ''})`,
+    `sent ${kb(tx)}`, `received ${kb(rx)}`, `packet overhead ${kb(pkt)}`, `keep-alive ${kb(ka)}`,
+  ];
+  const msgs = [[ref, 'refresh'], [cmd, 'command'], [fol, 'power follow-up'], [plug, 'plug Wi-Fi'],
+    [beat, 'heartbeat'], [hist, 'history'], [held, 'held back']]
+    .filter(([c]) => c).map(([c, l]) => `${c} ${l}`);
+  return parts.join(' · ') + (msgs.length ? `<br>messages: ${msgs.join(', ')}` : '');
 }
 
 // ---- dialogs ------------------------------------------------------------------
@@ -584,7 +619,10 @@ $('logout').addEventListener('click', () => {
   try { localStorage.removeItem('plugctl'); } catch {}
   location.reload();
 });
-$('refresh').addEventListener('click', refresh);
+$('refresh').addEventListener('click', () => {
+  if (status?.net?.sv) setBanner('Data saver is on for today, so the controller won’t answer refreshes until 6 PM. On, Off and timers still work.', 'warn');
+  refresh();
+});
 $('tz').innerHTML = TIMEZONES.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
 $('saveTz').addEventListener('click', async () => {
   const cfg = baseConfig();

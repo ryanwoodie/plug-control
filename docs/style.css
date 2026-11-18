@@ -176,4 +176,3 @@ table.cyc tr.rapid td { color: var(--danger); }
 table.usage { border-collapse: collapse; font-size: .85rem; white-space: nowrap; }
 table.usage th, table.usage td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--line, #ddd); }
 table.usage td.small { white-space: normal; min-width: 14em; }
-.plug .other { margin: 4px 0; }

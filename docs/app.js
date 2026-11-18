@@ -377,9 +377,8 @@ function render() {
 // The other owners' plugs, as a hint (firmware 1.2+): [name, reachable, on, rotating].
 function otherPlugs() {
   const op = status?.op || [];
-  if (!op.length) return '';
   const st = ([, ok, on, rot]) => (!ok ? 'not seen' : rot ? 'rotating' : on ? '<b>on</b>' : 'off');
-  return `<p class="muted small other">${op.map((o) => `${esc(o[0])}: ${st(o)}`).join(' · ')}</p>`;
+  return op.map((o) => `${esc(o[0])}: ${st(o)}`).join(' · ');
 }
 
 function plugCard(mac, s, pc) {
@@ -423,7 +422,6 @@ function plugCard(mac, s, pc) {
       <span class="dot"></span><span class="big">${stateTxt}</span> ${timer}
     </div>
     ${via}
-    ${otherPlugs()}
     ${s.ok && s.w !== undefined ? `<p class="meter"><span>${(s.w ?? 0).toFixed(1)} W</span><span>${s.v ?? '–'} V</span><span>${(s.kwh ?? 0).toFixed(3)} kWh total</span></p>` : ''}
     ${pendTxt}
     <div class="actions">
@@ -455,10 +453,14 @@ function renderDevice() {
     ['Settings', pendingCfg ? 'saving… (waiting for controller)' : config ? 'up to date' : 'defaults'],
     ['Firmware', `${esc(status.fw)} · up ${Math.floor(status.up / 3600)} h${status.fwq ? `<br><b>Update ${esc(status.fwq.v)} waiting</b>: turn on your hotspot (${esc(status.fwq.h || 'none listed')}) near the controller. It looks every 2 minutes, installs in about 2 minutes and restarts; plugs drop off briefly.${status.fwq.e ? ` Last try: ${esc(status.fwq.e)}.` : ''}` : ''}`],
   ];
-  if (n.lim) rows.push(['Data limits', `today: saver at ${kb(n.lim[0])}, stop at ${kb(n.lim[1])}${n.x ? ` (incl. ${kb(n.x)} extra you allowed)` : ''} · month: saver at ${kb(n.lim[2])}, stop at ${kb(n.lim[3])} · the day resets at ${hhmm(dayResetS())}`]);
-  if (n.ub) rows.push(['Data today by kind', usageBreakdown(n)]);
+  if (status.op?.length) rows.splice(1, 0, ['Other plugs', otherPlugs()]);
+  const data = [];
+  if (n.lim) data.push(['Limits', `today: saver at ${kb(n.lim[0])}, stop at ${kb(n.lim[1])}${n.x ? ` (incl. ${kb(n.x)} extra you allowed)` : ''} · month: saver at ${kb(n.lim[2])}, stop at ${kb(n.lim[3])} · the day resets at ${hhmm(dayResetS())}`]);
+  if (n.ub) data.push(['Today by kind', usageBreakdown(n)]);
   if (status.gps) rows.push(['Location', `<a href="https://maps.google.com/?q=${status.gps[0]},${status.gps[1]}" target="_blank" rel="noopener">${status.gps[0]}, ${status.gps[1]}</a>`]);
-  d.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  const dl = (r) => r.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  d.innerHTML = dl(rows);
+  $('dataInfo').innerHTML = dl(data);
   $('tz').value = (config || baseConfig()).tz;
 }
 

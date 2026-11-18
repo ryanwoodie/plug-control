@@ -448,7 +448,7 @@ function dayResetS() {
   const d = new Date();
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) / 1000;
 }
-const fmtClock = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+// fmtClock(t) is in history.js.
 // Capped controllers check in at the top of each UTC hour (every 6 h for the monthly cap).
 const nextCheckIn = (every) => (Math.floor(nowS() / every) + 1) * every;
 const pendingMore = () => (cmds.q || []).find((c) => c.a === 'more' && nowS() - c.t < MORE_MAX_AGE && !(status?.ax || []).includes(c.id));

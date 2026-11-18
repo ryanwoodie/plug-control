@@ -29,6 +29,12 @@ Remote control for Shelly and TP-Link Kasa smart plugs over a 1NCE IoT SIM, buil
   reports in an hour, and more than 4 MQTT sessions in an hour spaces the next
   one 15 minutes out. The day runs midnight to midnight UTC (6 PM in
   Saskatchewan). The device panel shows what today's data went on.
+  Past the cap it sends one last report saying so, then checks in briefly at
+  the top of each UTC hour (every 6 h for the monthly cap, ~1 KB each). The
+  web app explains the saver or cap and has an "Allow 50 KB more today"
+  button, which raises both limits for the day (and the month's by the same)
+  as soon as the controller sees it: at once in saver mode, at the next
+  check-in when capped.
 - **Web app refresh.** The app asks for a fresh status by itself only once per
   page load, while the page is on screen, and at most every 15 minutes per
   browser; reconnecting to the broker never triggers it.

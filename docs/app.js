@@ -9,6 +9,9 @@
 const BROKER_WS = 'wss://broker.hivemq.com:8884/mqtt';
 const PBKDF2_ITERS = 100000; // must match tools/make_secrets.py
 const CMD_MAX_AGE = 900;     // seconds; matches CMD_MAX_AGE_S in firmware
+const MORE_MAX_AGE = 7200;   // "allow more data" waits for an hourly check-in
+const MORE_KB = 50;
+const cmdAge = (c) => (c.a === 'more' ? MORE_MAX_AGE : CMD_MAX_AGE);
 const STALE_AFTER = 10 * 60; // auto-refresh if the last status is older than this
 const OFFLINE_AFTER = 6.5 * 3600; // the controller reports at least every 6 h
 // The controller drops MQTT packets over 2048 bytes (firmware link.cpp), so a
@@ -126,7 +129,7 @@ async function publish(kind, obj) {
 async function sendCmd(a, plug, extra = {}) {
   const now = nowS();
   const id = hex(crypto.getRandomValues(new Uint8Array(4)));
-  const q = (cmds.q || []).filter((c) => now - c.t < CMD_MAX_AGE && !(status?.ax || []).includes(c.id)).slice(-4);
+  const q = (cmds.q || []).filter((c) => now - c.t < cmdAge(c) && !(status?.ax || []).includes(c.id)).slice(-4);
   q.push({ id, t: now, a, p: plug, ...extra });
   cmds = { q };
   await publish('x', cmds);
@@ -347,7 +350,7 @@ function setBanner(text, kind = 'info') {
 
 function pendingFor(mac) {
   const ax = status?.ax || [];
-  return (cmds.q || []).filter((c) => c.p === mac && c.a !== 'ref' && !ax.includes(c.id) && nowS() - c.t < CMD_MAX_AGE);
+  return (cmds.q || []).filter((c) => c.p === mac && c.a !== 'ref' && c.a !== 'more' && !ax.includes(c.id) && nowS() - c.t < CMD_MAX_AGE);
 }
 
 function render() {
@@ -421,25 +424,68 @@ function plugCard(mac, s, pc) {
 }
 
 function renderDevice() {
-  const off = $('offline');
-  const silent = status && nowS() - status.t > OFFLINE_AFTER;
-  off.hidden = !silent;
-  if (silent) off.textContent = `The controller hasn't reported since ${new Date(status.t * 1000).toLocaleString()}, so it's probably offline (power, cell signal, or its daily data limit). Commands are kept for 15 minutes in case it comes back.`;
+  renderDataState();
   const d = $('devInfo');
   if (!status) { d.innerHTML = '<dt>Status</dt><dd>No report yet</dd>'; return; }
   const n = status.net || {};
   const rows = [
     ['Last report', `${fmtAgo(status.t)} (${new Date(status.t * 1000).toLocaleString()})`],
     ['Cell signal', `${signal(n.csq)}${n.op ? ' · network ' + esc(n.op) : ''}`],
-    ['SIM data (est.)', `today ${kb(n.d || 0)} · this month ${kb(n.m || 0)} · all time ${kb(n.tot || 0)}${n.cap ? ' · <b>cap reached, paused</b>' : n.sv ? ' · <b>data saver on</b>: refreshes and minor updates paused until 6 PM; On/Off still work' : ''}`],
+    ['SIM data (est.)', `today ${kb(n.d || 0)} · this month ${kb(n.m || 0)} · all time ${kb(n.tot || 0)}${n.cap ? ' · <b>limit reached, paused</b>' : n.sv ? ' · <b>data saver on</b>' : ''}`],
     ['Clock', status.ts || 'none'],
     ['Settings', pendingCfg ? 'saving… (waiting for controller)' : config ? 'up to date' : 'defaults'],
     ['Firmware', `${esc(status.fw)} · up ${Math.floor(status.up / 3600)} h`],
   ];
+  if (n.lim) rows.push(['Data limits', `today: saver at ${kb(n.lim[0])}, stop at ${kb(n.lim[1])}${n.x ? ` (incl. ${kb(n.x)} extra you allowed)` : ''} · month: saver at ${kb(n.lim[2])}, stop at ${kb(n.lim[3])} · the day resets at ${fmtClock(dayResetS())}`]);
   if (n.ub) rows.push(['Data today by kind', usageBreakdown(n)]);
   if (status.gps) rows.push(['Location', `<a href="https://maps.google.com/?q=${status.gps[0]},${status.gps[1]}" target="_blank" rel="noopener">${status.gps[0]}, ${status.gps[1]}</a>`]);
   d.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
   $('tz').value = (config || baseConfig()).tz;
+}
+
+// The controller's data day runs on UTC: midnight UTC in local time.
+function dayResetS() {
+  const d = new Date();
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) / 1000;
+}
+const fmtClock = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+// Capped controllers check in at the top of each UTC hour (every 6 h for the monthly cap).
+const nextCheckIn = (every) => (Math.floor(nowS() / every) + 1) * every;
+const pendingMore = () => (cmds.q || []).find((c) => c.a === 'more' && nowS() - c.t < MORE_MAX_AGE && !(status?.ax || []).includes(c.id));
+
+// The banner under the header: what the data guard is doing, and a way past it.
+function renderDataState() {
+  const el = $('offline');
+  const n = status?.net || {};
+  const silent = status && nowS() - status.t > OFFLINE_AFTER;
+  const reset = fmtClock(dayResetS());
+  let html = '';
+  let more = false;
+  if (status && n.cap) {
+    const month = n.cap === 2;
+    const next = fmtClock(nextCheckIn(month ? 21600 : 3600));
+    html = month
+      ? `<b>Monthly data limit reached</b> (${kb(n.m || 0)}). The controller is offline until the 1st, except a short check-in every 6 hours (next about ${next}).`
+      : `<b>Daily data limit reached</b> (${kb(n.d || 0)}). The controller is offline until ${reset}, except a short check-in at the top of each hour (next about ${next}).`;
+    html += ' Plug schedules and running timers keep going. On/Off sent now only reach it if a check-in comes within 15 minutes.';
+    more = true;
+  } else if (status && n.sv && !silent) {
+    html = `<b>Data saver on</b>: ${kb(n.d || 0)} used today${n.lim ? `, the controller stops at ${kb(n.lim[1])}` : ''}. Until ${reset} it skips refreshes and minor updates (plug Wi-Fi blips, rotation switches, history). On, Off and timers still work.`;
+    more = true;
+  } else if (silent) {
+    const likelyCap = !n.lim && (n.d || 0) > 140 * 1024;
+    html = `The controller hasn't reported since ${new Date(status.t * 1000).toLocaleString()}, so it's probably offline (${likelyCap ? `most likely its daily data limit, until ${reset}` : 'power, cell signal, or its daily data limit'}). Commands are kept for 15 minutes in case it comes back.`;
+  }
+  if (more && status?.fw && fwAtLeast('1.2')) {
+    const p = pendingMore();
+    html += p
+      ? `<br>Asked for ${MORE_KB} KB more at ${fmtClock(p.t)}; ${n.cap ? 'it takes effect at the next check-in' : 'waiting for the controller'}.`
+      : `<br><button id="allowMore" class="small">Allow ${MORE_KB} KB more today</button>`;
+  }
+  el.hidden = !html;
+  el.innerHTML = html;
+  const b = $('allowMore');
+  if (b) b.onclick = () => sendCmd('more', '', { k: MORE_KB });
 }
 
 // Firmware 1.2+: what today's data went on (UTC day, resets 6 PM local).
@@ -620,7 +666,7 @@ $('logout').addEventListener('click', () => {
   location.reload();
 });
 $('refresh').addEventListener('click', () => {
-  if (status?.net?.sv) setBanner('Data saver is on for today, so the controller won’t answer refreshes until 6 PM. On, Off and timers still work.', 'warn');
+  if (status?.net?.cap || status?.net?.sv) setBanner(`Data saver is on, so the controller won’t answer refreshes until ${fmtClock(dayResetS())} unless you allow more data. On, Off and timers still work.`, 'warn');
   refresh();
 });
 $('tz').innerHTML = TIMEZONES.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');

@@ -33,8 +33,11 @@ struct LinkInfo {
   int csq;       // 0-31, 99 = unknown
   String op;     // operator MCC/MNC
   uint32_t today, month, total;  // estimated bytes on the SIM
-  bool capped;   // data cap reached; link idle until the period rolls over
+  bool capped;   // data cap reached; link idle (but for hourly check-ins) until the period rolls over
+  bool capMonth; // ... and it is the monthly cap (check-ins every 6 h)
   bool saving;   // past the data reserve: only essential messages go out
+  // Current limits, including any extra the owners allowed (linkAllow).
+  uint32_t dayReserve, dayCap, monthReserve, monthCap, extraDay;
   DayUse use;    // today's breakdown (UTC day, like `today`)
 };
 
@@ -43,6 +46,9 @@ void linkPublish(const String &topic, std::vector<uint8_t> &&payload);
 bool linkReceive(String &topic, std::vector<uint8_t> &payload);
 LinkInfo linkInfo();
 void linkCount(Usage u);
+// Allow this many more bytes today (and this month) on top of the reserve
+// and cap; resets when the period rolls over.
+void linkAllow(uint32_t bytes);
 
 // Implemented by the app: called with UTC from the cell network clock.
 void noteTime(time_t utc, const char *source);

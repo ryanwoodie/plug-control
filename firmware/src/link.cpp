@@ -15,7 +15,9 @@ static TinyGsm modem(SerialAT);
 static TinyGsmClient gsm(modem, 0);
 static QueueHandle_t outQ, inQ;
 static SemaphoreHandle_t infoLock;
-static LinkInfo info{false, 99, "", 0, 0, 0, false, false, {}};
+static LinkInfo info{false, 99, "", 0, 0, 0, false, false, false, DAILY_RESERVE_BYTES, DAILY_CAP_BYTES,
+                      MONTHLY_RESERVE_BYTES, MONTHLY_CAP_BYTES, 0, {}};
+static uint32_t extraMonth = 0;
 static std::vector<String> subs;
 static Preferences store;
 
@@ -28,6 +30,15 @@ static uint32_t dbgConn, dbgTx, dbgRx, dbgOvh, dbgReconnects, dbgPub, dbgRecv;
 
 static uint32_t lastTrafficMs = 0;
 
+// With infoLock held: recompute the limits and the data saver flag.
+static void limitsLocked() {
+  info.dayReserve = DAILY_RESERVE_BYTES + info.extraDay;
+  info.dayCap = DAILY_CAP_BYTES + info.extraDay;
+  info.monthReserve = MONTHLY_RESERVE_BYTES + extraMonth;
+  info.monthCap = MONTHLY_CAP_BYTES + extraMonth;
+  info.saving = info.today >= info.dayReserve || info.month >= info.monthReserve;
+}
+
 // field: which DayUse counter the bytes belong to.
 static void meterAdd(uint32_t n, uint32_t DayUse::*field) {
   lastTrafficMs = millis();
@@ -36,7 +47,7 @@ static void meterAdd(uint32_t n, uint32_t DayUse::*field) {
   info.month += n;
   info.total += n;
   info.use.*field += n;
-  info.saving = info.today >= DAILY_RESERVE_BYTES || info.month >= MONTHLY_RESERVE_BYTES;
+  limitsLocked();
   xSemaphoreGive(infoLock);
 }
 
@@ -53,6 +64,8 @@ static void meterSave() {
   store.putUInt("month", info.month);
   store.putUInt("total", info.total);
   store.putBytes("use", &info.use, sizeof info.use);
+  store.putUInt("xday", info.extraDay);
+  store.putUInt("xmon", extraMonth);
   lastMeterSave = millis();
 }
 
@@ -65,9 +78,9 @@ static void meterRoll() {
   uint32_t mon = day / 100;
   if (day != meterDay || mon != meterMonth) {
     xSemaphoreTake(infoLock, portMAX_DELAY);
-    if (day != meterDay) info.today = 0, info.use = DayUse{};
-    if (mon != meterMonth) info.month = 0;
-    info.saving = info.today >= DAILY_RESERVE_BYTES || info.month >= MONTHLY_RESERVE_BYTES;
+    if (day != meterDay) info.today = 0, info.use = DayUse{}, info.extraDay = 0;
+    if (mon != meterMonth) info.month = 0, extraMonth = 0;
+    limitsLocked();
     xSemaphoreGive(infoLock);
     meterDay = day;
     meterMonth = mon;
@@ -248,10 +261,21 @@ static bool mqttConnect() {
 
 static bool capReached() {
   xSemaphoreTake(infoLock, portMAX_DELAY);
-  bool c = info.today >= DAILY_CAP_BYTES || info.month >= MONTHLY_CAP_BYTES;
+  info.capMonth = info.month >= info.monthCap;
+  bool c = info.capMonth || info.today >= info.dayCap;
   info.capped = c;
   xSemaphoreGive(infoLock);
   return c;
+}
+
+void linkAllow(uint32_t bytes) {
+  xSemaphoreTake(infoLock, portMAX_DELAY);
+  info.extraDay += bytes;
+  extraMonth += bytes;
+  limitsLocked();
+  xSemaphoreGive(infoLock);
+  meterSave();
+  Serial.printf("[meter] owner allowed %u B more\n", bytes);
 }
 
 static void linkTask(void *) {
@@ -259,6 +283,10 @@ static void linkTask(void *) {
   int fails = 0;
   bool dataOff = false, wasOnline = false;
   uint32_t onlineSince = 0, sessionGapMs = 0;
+  // While capped: a brief check-in each hour (6 h for the monthly cap) so an
+  // owner's "allow more data" can get through, ~1 KB each.
+  uint32_t checkUntil = 0, capSlot = 0;
+  bool capGraceDone = false;
 
   while (!modemPowerOn()) {
     Serial.println("[link] modem not responding, retrying in 60s");
@@ -281,7 +309,33 @@ static void linkTask(void *) {
                     dbgReconnects, dbgPub, dbgRecv);
     }
 
-    if (capReached()) {
+    bool capped = capReached();
+    bool checking = checkUntil && (int32_t)(millis() - checkUntil) < 0;
+    // Just capped: stay on 15 s so the app's last report (saying so) goes out.
+    static uint32_t capSince = 0;
+    if (capped && !capGraceDone && mqtt.connected()) {
+      if (!capSince) capSince = millis();
+      if (millis() - capSince < 15000) checking = true;
+      else capGraceDone = true;
+    }
+    if (!capped) capSince = 0, capGraceDone = false, capSlot = 0;
+    if (capped && !checking) {
+      checkUntil = 0;
+      time_t now = time(nullptr);
+      if (now > 1700000000) {
+        // Check-ins at the top of the UTC hour (every 6 h for the monthly
+        // cap), so the web app can say when the next one is.
+        uint32_t slot = info.capMonth ? now / 21600 : now / 3600;
+        if (!capSlot) capSlot = slot;
+        if (slot != capSlot) {
+          capSlot = slot;
+          checkUntil = millis() + 150000;  // to connect; 30 s once online
+          nextTry = 0;
+          dataOff = false;
+          Serial.println("[link] capped: checking in for an override");
+          continue;
+        }
+      }
       // Close the data session but stay registered: registration uses no
       // data and keeps the network clock coming, which the cap needs to know
       // when the day rolls over (radio off here deadlocked after a reboot).
@@ -295,10 +349,10 @@ static void linkTask(void *) {
         wasOnline = false;
       }
       if (time(nullptr) < 1700000000 && modem.isNetworkConnected()) syncNetworkTime();
-      delay(60000);
+      delay(5000);
       continue;
     }
-    if (dataOff) {
+    if (dataOff && !capped) {
       Serial.println("[link] data cap cleared");
       dataOff = false;
     }
@@ -339,7 +393,15 @@ static void linkTask(void *) {
         }
         ok = modem.isGprsConnected() && mqttConnect();
       }
-      if (ok) {
+      if (ok && capped) {
+        // A check-in: 30 s for queued commands to arrive and any reply to go
+        // out. Not counted towards the session spacing below.
+        checkUntil = millis() + 30000;
+        fails = 0;
+        setOnline(true);
+        wasOnline = true;
+        onlineSince = millis();
+      } else if (ok) {
         // A link that keeps dropping (or a broker that keeps forgetting us)
         // costs a session setup each time: space them out past a few an hour.
         static uint32_t recent[SESSIONS_PER_HOUR];
@@ -412,7 +474,9 @@ void linkBegin(const std::vector<String> &subscribeTopics) {
   info.month = store.getUInt("month");
   info.total = store.getUInt("total");
   if (store.getBytesLength("use") == sizeof info.use) store.getBytes("use", &info.use, sizeof info.use);
-  info.saving = info.today >= DAILY_RESERVE_BYTES || info.month >= MONTHLY_RESERVE_BYTES;
+  info.extraDay = store.getUInt("xday");
+  extraMonth = store.getUInt("xmon");
+  limitsLocked();
   // Idle priority: TinyGSM busy-waits (up to 75 s on a socket open) and would
   // otherwise starve IDLE0 and trip the task watchdog.
   xTaskCreatePinnedToCore(linkTask, "link", 12288, nullptr, tskIDLE_PRIORITY, nullptr, 0);

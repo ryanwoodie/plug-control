@@ -274,6 +274,15 @@ static void handleCommands(uint8_t oi, JsonDocument &doc) {
     if (o.seen.size() > 12) o.seen.erase(o.seen.begin());
     changed = true;
     String a = c["a"] | "";
+    if (a == "more") {
+      // An owner allows more data today (lifts the data saver or the cap).
+      // Accepted for 2 h: a capped controller only checks in hourly.
+      long age = timeValid() ? (long)(time(nullptr) - (time_t)(c["t"] | 0u)) : 0;
+      uint32_t kb = c["k"] | 0u;
+      if (labs(age) <= 7200 && kb && kb <= 1024) linkAllow(kb * 1024);
+      markDirty(oi, DIRTY_URGENT | DIRTY_FORCE);
+      continue;
+    }
     if (a == "ref") {
       // Past the data reserve a refresh is not answered; the web app says so.
       if (linkInfo().saving) linkCount(U_HELD);
@@ -359,8 +368,12 @@ static String buildStatus(uint8_t oi) {
   n["d"] = li.today;
   n["m"] = li.month;
   n["tot"] = li.total;
-  if (li.capped) n["cap"] = 1;
+  if (li.capped) n["cap"] = li.capMonth ? 2 : 1;
   if (li.saving) n["sv"] = 1;
+  // Data saver and cap points, today and this month (bytes), incl. extra allowed.
+  JsonArray lim = n["lim"].to<JsonArray>();
+  for (uint32_t v : {li.dayReserve, li.dayCap, li.monthReserve, li.monthCap}) lim.add(v);
+  if (li.extraDay) n["x"] = li.extraDay;
   // Today's breakdown: [connect, sent, received, packet overhead, keep-alive]
   // bytes, [sessions, fresh sessions], and message counts by Usage.
   JsonArray ub = n["ub"].to<JsonArray>();
@@ -402,6 +415,11 @@ static void reportStatus() {
     for (uint8_t i = 0; i < OWNER_COUNT; i++) markDirty(i, DIRTY_LAZY | DIRTY_FORCE, U_BEAT);
   }
   LinkInfo li = linkInfo();
+  // Just hit the cap: one last report saying so, sent before the link closes.
+  static bool wasCapped = false;
+  if (li.capped && !wasCapped)
+    for (uint8_t i = 0; i < OWNER_COUNT; i++) markDirty(i, DIRTY_URGENT | DIRTY_FORCE, U_BEAT);
+  wasCapped = li.capped;
   if (!li.online) return;  // stay dirty until the link is up
   for (uint8_t i = 0; i < OWNER_COUNT; i++) {
     Owner &o = owners[i];

@@ -12,6 +12,7 @@
 #include "history.h"
 #include "sched.h"
 #include "fwupdate.h"
+#include "fwfetch.h"
 #include "kasa.h"
 #include "link.h"
 #include "secrets.h"
@@ -48,6 +49,9 @@ struct Plug {
   char src = '-';  // what last switched it: s=schedule m=manual t=timer b=button/local
   bool prevWant = false, schedPending = false;
   uint32_t lastCmdMs = 0, lastPollMs = 0;
+  time_t onSince = 0, onAlertAt = 0;  // for the "on for 12 h" alert
+  uint32_t goneMs = 0;  // when it stopped answering
+  bool goneAlerted = false;
   bool kasa() const { return def->type == 'k'; }
 };
 
@@ -96,6 +100,13 @@ static void markDirty(uint8_t owner, uint8_t level = DIRTY_URGENT, Usage why = U
   owners[owner].why |= 1 << why;
 }
 
+// Each owner's report shows the other plugs' on/off as a hint: when one
+// switches, the other owners get a lazy report (dropped if nothing shows).
+static void markOthers(uint8_t owner) {
+  for (uint8_t i = 0; i < OWNER_COUNT; i++)
+    if (i != owner) markDirty(i, DIRTY_LAZY, U_OTHER);
+}
+
 // ---- owner config ----------------------------------------------------------
 static void loadConfig(uint8_t oi, const String &json, bool persist) {
   JsonDocument doc;
@@ -134,6 +145,7 @@ static void saveSeen(uint8_t oi) {
 static bool setPlug(Plug &p, bool on, uint32_t secs, char src) {
   p.lastCmdMs = millis();
   if (p.ip.isEmpty() || !(p.kasa() ? kasaSet(p.ip, on, secs) : shellySet(p.ip, on, secs))) return false;
+  if (on != p.on) p.onSince = on && timeValid() ? time(nullptr) : 0, p.onAlertAt = 0;
   p.on = on;
   p.src = src;
   if (!on && src == 'm' && p.cycleEnd) p.stopUntil = p.cycleEnd;  // Off ends this rotation run
@@ -143,6 +155,7 @@ static bool setPlug(Plug &p, bool on, uint32_t secs, char src) {
   // minute later so the app sees the load's actual draw.
   bool rotating = src == 's' && p.cycleEnd;
   markDirty(p.def->owner, rotating ? DIRTY_LAZY : DIRTY_URGENT);
+  if (!rotating) markOthers(p.def->owner);
   p.followMs = on && !rotating && !p.kasa() ? (millis() + 60000) | 1 : 0;
   Serial.printf("[plug] %s %s %lus (%c)\n", p.def->mac, on ? "ON" : "OFF", (unsigned long)secs, src);
   return true;
@@ -158,6 +171,8 @@ static bool pollKasa(Plug &p, ShellyStatus &st) {
     // It lost power. Kasa plugs restore their last state and drop their
     // countdown, so switch it off like a Shelly would; a schedule re-applies.
     Serial.printf("[plug] %s restarted\n", p.def->mac);
+    linkNotify(p.name + " lost power", String("It restarted") + (ks.on ? " on, so the controller switched it off." : ".") +
+               (p.prevWant ? " Its schedule switches it back on." : ""), 3, "electric_plug");
     kasaSetClock(p.ip);
     if (ks.on && kasaSet(p.ip, false)) st.on = false;
     p.timerEnd = 0;
@@ -173,6 +188,7 @@ static void pollPlug(Plug &p) {
       p.reachable = false;
       histSample(&p - plugs, false, false, 0);
       markDirty(p.def->owner, DIRTY_LAZY, U_PLUG);
+      markOthers(p.def->owner);
       Serial.printf("[plug] %s unreachable\n", p.def->mac);
     }
     return;
@@ -182,6 +198,7 @@ static void pollPlug(Plug &p) {
     p.reachable = true;
     p.everSeen = true;
     markDirty(p.def->owner, DIRTY_LAZY, U_PLUG);
+    markOthers(p.def->owner);
     Serial.printf("[plug] %s online at %s\n", p.def->mac, p.ip.c_str());
     if (p.prevWant && !st.on && p.src == 's') p.schedPending = true;  // plug lost power mid-window
   }
@@ -196,7 +213,9 @@ static void pollPlug(Plug &p) {
     if (!timedOff && millis() - p.lastCmdMs > 5000) p.src = 'b';
     if (!st.on) p.timerEnd = 0;
     markDirty(p.def->owner, timedOff && p.cycleEnd ? DIRTY_LAZY : DIRTY_URGENT);
+    if (!p.cycleEnd) markOthers(p.def->owner);
   }
+  if (st.on != p.on) p.onSince = st.on ? time(nullptr) : 0, p.onAlertAt = 0;
   p.on = st.on;
   p.watts = st.watts;
   p.volts = st.volts;
@@ -298,9 +317,12 @@ static void handleCommands(uint8_t oi, JsonDocument &doc) {
     for (auto &p : plugs) {
       if (p.def->owner != oi || strcmp(p.def->mac, c["p"] | "") != 0) continue;
       uint32_t mins = c["m"] | 0;
-      if (a == "on") setPlug(p, true, p.maxOn * 60, 'm');
-      else if (a == "off") setPlug(p, false, 0, 'm');
-      else if (a == "tmr" && mins) setPlug(p, true, mins * 60, 't');
+      bool ok = true;
+      if (a == "on") ok = setPlug(p, true, p.maxOn * 60, 'm');
+      else if (a == "off") ok = setPlug(p, false, 0, 'm');
+      else if (a == "tmr" && mins) ok = setPlug(p, true, mins * 60, 't');
+      if (!ok) linkNotify("Couldn't switch " + p.name, String("The plug didn't take the ") + (a == "off" ? "Off" : "On") +
+                          " command" + (p.reachable ? "." : ": it isn't answering on Wi-Fi."), 4, "warning");
     }
   }
   if (changed) saveSeen(oi);
@@ -311,6 +333,10 @@ static void handleInbound() {
   std::vector<uint8_t> data;
   while (linkReceive(topic, data)) {
     if (histInbound(topic, data.data(), data.size())) continue;
+    if (fetchInbound(topic, data.data(), data.size())) {
+      for (uint8_t i = 0; i < OWNER_COUNT; i++) markDirty(i, DIRTY_LAZY | DIRTY_FORCE);  // show "update waiting"
+      continue;
+    }
     for (uint8_t i = 0; i < OWNER_COUNT; i++) {
       Owner &o = owners[i];
       if (topic != o.topicC && topic != o.topicX) continue;
@@ -343,6 +369,13 @@ static String buildStatus(uint8_t oi) {
   d["t"] = (uint32_t)time(nullptr);
   d["up"] = millis() / 1000;
   d["fw"] = FW_VERSION;
+  String fwq = fetchWaiting();
+  if (fwq.length()) {  // an update is waiting for a hotspot
+    JsonObject u = d["fwq"].to<JsonObject>();
+    u["v"] = fwq;
+    u["h"] = fetchHotspots();
+    if (fetchError().length()) u["e"] = fetchError();
+  }
   d["cv"] = owners[oi].cfgVer;
   d["tz"] = owners[oi].tz;
   JsonArray ax = d["ax"].to<JsonArray>();
@@ -361,6 +394,16 @@ static String buildStatus(uint8_t oi) {
     j["te"] = (uint32_t)p.timerEnd;
     j["s"] = String(p.src);
     if (p.cycleEnd) j["cy"] = (uint32_t)p.cycleEnd;
+  }
+  // The other owners' plugs, as a hint: [name, reachable, on, rotating].
+  JsonArray op = d["op"].to<JsonArray>();
+  for (auto &p : plugs) {
+    if (p.def->owner == oi) continue;
+    JsonArray a = op.add<JsonArray>();
+    a.add(p.name);
+    a.add(p.reachable ? 1 : 0);
+    a.add(p.on ? 1 : 0);
+    a.add(p.cycleEnd ? 1 : 0);
   }
   JsonObject n = d["net"].to<JsonObject>();
   n["csq"] = li.csq;
@@ -405,6 +448,10 @@ static String stateSignature(uint8_t oi) {
     if (p.cycleEnd) s += "cy" + String((uint32_t)p.cycleEnd);
     else s += (p.on ? "1" : "0") + String(p.src) + String((uint32_t)p.timerEnd);
   }
+  for (auto &p : plugs) {
+    if (p.def->owner == oi) continue;
+    s += "|o" + String(p.reachable ? "1" : "0") + (p.cycleEnd ? "r" : p.on ? "1" : "0");
+  }
   return s;
 }
 
@@ -440,7 +487,7 @@ static void reportStatus() {
     }
     // A plug that keeps dropping off Wi-Fi: after 3 reports about it in an
     // hour, at most one every 20 minutes.
-    bool plugOnly = lazyOnly && o.why == (1 << U_PLUG);
+    bool plugOnly = lazyOnly && !(o.why & ~((1 << U_PLUG) | (1 << U_OTHER)));
     if (plugOnly) {
       if (millis() - o.plugWinMs > 3600 * 1000UL) o.plugWinMs = millis(), o.plugReps = 0;
       if (o.plugReps >= 3 && millis() - o.lastReportMs < 20 * 60 * 1000UL) continue;
@@ -448,7 +495,7 @@ static void reportStatus() {
     }
     std::vector<uint8_t> sealed;
     if (sealMsg(o.def->key, o.topicS, buildStatus(i), sealed)) linkPublish(o.topicS, std::move(sealed));
-    static const Usage order[] = {U_REF, U_CMD, U_FOLLOW, U_PLUG, U_BEAT};
+    static const Usage order[] = {U_REF, U_CMD, U_FOLLOW, U_PLUG, U_OTHER, U_BEAT};
     Usage why = U_BEAT;  // the first report after boot has no other reason
     for (Usage u : order)
       if (o.why & (1 << u)) { why = u; break; }
@@ -457,6 +504,80 @@ static void reportStatus() {
     o.lastReportMs = millis();
     o.dirty = o.why = 0;
     o.heldNoted = false;
+  }
+}
+
+// ---- push alerts (ntfy) -----------------------------------------------------
+static String hours(time_t s) { return String((s + 1800) / 3600); }
+static String localHM(time_t t, uint8_t owner) {
+  setenv("TZ", owners[owner].tz.c_str(), 1);
+  tzset();
+  struct tm lt;
+  localtime_r(&t, &lt);
+  char b[8];
+  strftime(b, sizeof b, "%H:%M", &lt);
+  return b;
+}
+
+static void checkAlerts() {
+  static uint32_t last = 0;
+  if (millis() - last < 30000) return;
+  last = millis();
+  time_t now = time(nullptr);
+  for (auto &p : plugs) {
+    if (p.reachable) {
+      if (p.goneAlerted) linkNotify(p.name + " is back", "It's answering on Wi-Fi again.", 2, "white_check_mark");
+      p.goneMs = 0;
+      p.goneAlerted = false;
+    } else {
+      if (!p.goneMs) p.goneMs = millis();
+      if (!p.goneAlerted && millis() - p.goneMs > 30 * 60 * 1000UL) {
+        p.goneAlerted = true;
+        linkNotify(p.name + " isn't answering", String(p.everSeen ? "It dropped off" : "It hasn't joined") +
+                   " the controller's Wi-Fi 30 minutes ago. If it's on, its own timer still switches it off.", 4, "warning");
+      }
+    }
+    // On for 12 h straight, and every 12 h after that.
+    if (!timeValid()) continue;
+    if (!p.on) {
+      if (p.reachable) p.onSince = p.onAlertAt = 0;
+      continue;
+    }
+    if (!p.onSince) p.onSince = now;
+    if (!p.onAlertAt) p.onAlertAt = p.onSince + 12 * 3600;
+    if (now >= p.onAlertAt) {
+      p.onAlertAt += 12 * 3600;
+      linkNotify(p.name + " has been on " + hours(now - p.onSince) + " h",
+                 p.timerEnd ? "Its timer ends at " + localHM(p.timerEnd, p.def->owner) + "." : String("It has no timer running."),
+                 4, "fire");
+    }
+  }
+  LinkInfo li = linkInfo();
+  static bool wasSaving = false, wasCapped = false;
+  if (li.saving && !wasSaving && !li.capped)
+    linkNotify("Data saver on", String(li.today / 1024) + " KB used today. Refreshes and minor updates are paused until the day resets; On/Off still work.", 2, "floppy_disk");
+  if (li.capped && !wasCapped)
+    linkNotify(li.capMonth ? "Monthly data limit reached" : "Daily data limit reached",
+               "The controller is offline but for hourly check-ins. Plug timers and schedules keep running. Use Allow more data in the app to bring it back.", 4, "no_entry");
+  wasSaving = li.saving;
+  wasCapped = li.capped;
+}
+
+// Once at boot: why it started, and whether the firmware changed.
+static void bootAlerts() {
+  String was = prefs.getString("fwv", "");
+  if (was != FW_VERSION) {
+    prefs.putString("fwv", FW_VERSION);
+    if (was.length()) linkNotify("Controller firmware " FW_VERSION, "It was running " + was + " before.", 3, "package");
+  }
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: linkNotify("Controller started", "It was powered up (power cut, or plugged in).", 3, "electric_plug"); break;
+    case ESP_RST_PANIC: linkNotify("Controller crashed and restarted", "Reason: software fault.", 4, "warning"); break;
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT: linkNotify("Controller hung and restarted", "Reason: watchdog.", 4, "warning"); break;
+    case ESP_RST_BROWNOUT: linkNotify("Controller restarted", "Reason: its power supply dipped (brownout).", 4, "warning"); break;
+    default: break;
   }
 }
 
@@ -607,6 +728,8 @@ void setup() {
   }
   histBegin(&prefs);
   for (auto &t : histTopics()) subs.push_back(t);
+  fetchBegin(&prefs, FW_VERSION);
+  subs.push_back(fetchTopic());
   for (uint8_t i = 0; i < OWNER_COUNT; i++) {
     String c = prefs.getString(("c" + String(i)).c_str(), "");
     if (c.length()) loadConfig(i, c, false);
@@ -621,6 +744,7 @@ void setup() {
   updateSetup(web, FW_VERSION);
 
   linkBegin(subs);
+  bootAlerts();
 }
 
 void loop() {
@@ -651,6 +775,8 @@ void loop() {
   provisionMissing();
   reportStatus();
   histLoop();
+  checkAlerts();
+  fetchLoop();
   updateLoop();
   delay(5);
 }

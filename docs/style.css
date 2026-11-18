@@ -170,3 +170,10 @@ table.cyc { width: 100%; border-collapse: collapse; font-size: .9rem; margin-top
 table.cyc th, table.cyc td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
 table.cyc th { color: var(--muted); font-weight: 500; }
 table.cyc tr.rapid td { color: var(--danger); }
+
+/* data use, past days */
+.scroll { overflow-x: auto; }
+table.usage { border-collapse: collapse; font-size: .85rem; white-space: nowrap; }
+table.usage th, table.usage td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--line, #ddd); }
+table.usage td.small { white-space: normal; min-width: 14em; }
+.plug .other { margin: 4px 0; }

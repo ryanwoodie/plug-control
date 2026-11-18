@@ -14,6 +14,8 @@ enum Usage : uint8_t {
   U_BEAT,    // 6-hourly heartbeat
   U_HIST,    // history batch (incl. resends)
   U_HELD,    // optional message held back by the data reserve
+  U_OTHER,   // report because another owner's plug switched (shown as a hint)
+  U_ALERT,   // ntfy alert
   U_COUNT
 };
 
@@ -39,6 +41,9 @@ struct LinkInfo {
   // Current limits, including any extra the owners allowed (linkAllow).
   uint32_t dayReserve, dayCap, monthReserve, monthCap, extraDay;
   DayUse use;    // today's breakdown (UTC day, like `today`)
+  // The last finished day, kept until the next roll for the history feed.
+  uint32_t prevDay, prevBytes;  // YYYYMMDD (UTC), estimated bytes
+  DayUse prevUse;
 };
 
 void linkBegin(const std::vector<String> &subscribeTopics);
@@ -49,6 +54,9 @@ void linkCount(Usage u);
 // Allow this many more bytes today (and this month) on top of the reserve
 // and cap; resets when the period rolls over.
 void linkAllow(uint32_t bytes);
+// A push alert to the ntfy topic (NTFY_TOPIC in secrets.h), sent over plain
+// HTTP on the next chance the link is up (~1.5 KB each). prio 1-5.
+void linkNotify(const String &title, const String &body, uint8_t prio = 3, const char *tags = "");
 
 // Implemented by the app: called with UTC from the cell network clock.
 void noteTime(time_t utc, const char *source);

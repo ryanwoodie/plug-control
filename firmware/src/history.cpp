@@ -63,12 +63,24 @@ static void dropOld() {
   }
 }
 
-static void sendBatch(int i, uint32_t now) {
-  uint8_t o = PLUGS[i].owner;
-  if (!seq[o]) seq[o] = now / 60;  // fresh (or reset) board: start above any earlier seq
+// Number, seal and queue one batch for owner o (sets d["q"]).
+static void queueSealed(uint8_t o, JsonDocument &d) {
+  if (!seq[o]) seq[o] = time(nullptr) / 60;  // fresh (or reset) board: start above any earlier seq
   uint32_t q = ++seq[o];
   prefs->putUInt(("hq" + String(o)).c_str(), seq[o]);
+  d["q"] = q;
+  String json;
+  serializeJson(d, json);
+  std::vector<uint8_t> sealed;
+  if (sealMsg(OWNERS[o].key, base(o) + "h/" + q, json, sealed)) {
+    backlogBytes += sealed.size();
+    backlog.push_back({o, q, std::move(sealed), true});
+    dropOld();
+  }
+}
 
+static void sendBatch(int i, uint32_t now) {
+  uint8_t o = PLUGS[i].owner;
   HistLog &l = logs[i];
   size_t n = 0;
   mbedtls_base64_encode(nullptr, 0, &n, l.buf.data(), l.buf.size());
@@ -77,7 +89,6 @@ static void sendBatch(int i, uint32_t now) {
 
   JsonDocument d;
   d["p"] = PLUGS[i].mac;
-  d["q"] = q;
   d["a"] = l.t0;
   d["b"] = now;
   JsonArray s = d["s"].to<JsonArray>();
@@ -85,18 +96,32 @@ static void sendBatch(int i, uint32_t now) {
   s.add(l.start.on ? 1 : 0);
   s.add(l.start.w);
   d["e"] = (const char *)b64.data();
-  String json;
-  serializeJson(d, json);
-
-  std::vector<uint8_t> sealed;
-  if (sealMsg(OWNERS[o].key, base(o) + "h/" + q, json, sealed)) {
-    backlogBytes += sealed.size();
-    backlog.push_back({o, q, std::move(sealed), true});
-    dropOld();
-  }
-  Serial.printf("[hist] %s batch %lu: %u B of changes over %lus\n", PLUGS[i].mac, (unsigned long)q,
+  queueSealed(o, d);
+  Serial.printf("[hist] %s batch %lu: %u B of changes over %lus\n", PLUGS[i].mac, (unsigned long)seq[o],
                 (unsigned)l.buf.size(), (unsigned long)(now - l.t0));
   l.begin(now);
+}
+
+// Once per finished (UTC) day: what the controller's data went on, as a
+// history batch of its own ({"u": day, ...}) so the collector files it with
+// the rest and the web app can show past days. Each owner gets a copy.
+static void usageSummary() {
+  LinkInfo li = linkInfo();
+  if (!li.prevDay || li.prevDay == prefs->getUInt("ud", 0)) return;
+  prefs->putUInt("ud", li.prevDay);
+  JsonDocument d;
+  d["u"] = li.prevDay;
+  d["d"] = li.prevBytes;
+  d["m"] = li.month;
+  JsonArray ub = d["ub"].to<JsonArray>();
+  for (uint32_t v : {li.prevUse.conn, li.prevUse.tx, li.prevUse.rx, li.prevUse.pkt, li.prevUse.ka}) ub.add(v);
+  JsonArray us = d["us"].to<JsonArray>();
+  us.add(li.prevUse.sess);
+  us.add(li.prevUse.fresh);
+  JsonArray un = d["un"].to<JsonArray>();
+  for (uint16_t v : li.prevUse.n) un.add(v);
+  for (uint8_t o = 0; o < OWNER_COUNT; o++) queueSealed(o, d);
+  Serial.printf("[hist] usage summary for %u: %u B\n", li.prevDay, li.prevBytes);
 }
 
 void histLoop() {
@@ -104,6 +129,7 @@ void histLoop() {
   if (millis() - lastMs < 1000 || !clockOk()) return;
   lastMs = millis();
   uint32_t now = time(nullptr);
+  usageSummary();
   for (int i = 0; i < PLUG_COUNT; i++) {
     if (!started[i]) continue;
     HistLog &l = logs[i];

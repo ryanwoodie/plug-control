@@ -2,7 +2,9 @@
 #include <Preferences.h>
 #include <TinyGsmClient.h>
 #include <PubSubClient.h>
+#include <deque>
 #include "board.h"
+#include "secrets.h"
 
 #define SerialAT Serial1
 
@@ -16,7 +18,7 @@ static TinyGsmClient gsm(modem, 0);
 static QueueHandle_t outQ, inQ;
 static SemaphoreHandle_t infoLock;
 static LinkInfo info{false, 99, "", 0, 0, 0, false, false, false, DAILY_RESERVE_BYTES, DAILY_CAP_BYTES,
-                      MONTHLY_RESERVE_BYTES, MONTHLY_CAP_BYTES, 0, {}};
+                      MONTHLY_RESERVE_BYTES, MONTHLY_CAP_BYTES, 0, {}, 0, 0, {}};
 static uint32_t extraMonth = 0;
 static std::vector<String> subs;
 static Preferences store;
@@ -66,6 +68,9 @@ static void meterSave() {
   store.putBytes("use", &info.use, sizeof info.use);
   store.putUInt("xday", info.extraDay);
   store.putUInt("xmon", extraMonth);
+  store.putUInt("pday", info.prevDay);
+  store.putUInt("pbytes", info.prevBytes);
+  store.putBytes("puse", &info.prevUse, sizeof info.prevUse);
   lastMeterSave = millis();
 }
 
@@ -78,7 +83,10 @@ static void meterRoll() {
   uint32_t mon = day / 100;
   if (day != meterDay || mon != meterMonth) {
     xSemaphoreTake(infoLock, portMAX_DELAY);
-    if (day != meterDay) info.today = 0, info.use = DayUse{}, info.extraDay = 0;
+    if (day != meterDay) {
+      if (meterDay) info.prevDay = meterDay, info.prevBytes = info.today, info.prevUse = info.use;
+      info.today = 0, info.use = DayUse{}, info.extraDay = 0;
+    }
     if (mon != meterMonth) info.month = 0, extraMonth = 0;
     limitsLocked();
     xSemaphoreGive(infoLock);
@@ -140,6 +148,65 @@ class MeteredClient : public Client {
 
 static MeteredClient metered(gsm);
 static PubSubClient mqtt(metered);
+static TinyGsmClient gsmHttp(modem, 1);  // second socket, for ntfy
+static MeteredClient meteredHttp(gsmHttp);
+
+// ---- ntfy alerts -----------------------------------------------------------
+struct Alert {
+  String title, body, tags;
+  uint8_t prio;
+};
+static std::deque<Alert> alerts;
+static SemaphoreHandle_t alertLock;
+
+void linkNotify(const String &title, const String &body, uint8_t prio, const char *tags) {
+  Serial.printf("[alert] %s: %s\n", title.c_str(), body.c_str());
+#ifdef NTFY_TOPIC
+  if (!alertLock) alertLock = xSemaphoreCreateMutex();  // may run before linkBegin
+  xSemaphoreTake(alertLock, portMAX_DELAY);
+  if (alerts.size() >= 8) alerts.pop_front();
+  alerts.push_back({title, body, tags, prio});
+  xSemaphoreGive(alertLock);
+#endif
+}
+
+// One alert per call while the MQTT link is up; plain HTTP keeps it ~1.5 KB
+// (TLS would add ~5 KB). The text is not secret: plug names and states.
+static void sendAlert() {
+#ifdef NTFY_TOPIC
+  if (!alertLock) return;
+  xSemaphoreTake(alertLock, portMAX_DELAY);
+  if (alerts.empty()) {
+    xSemaphoreGive(alertLock);
+    return;
+  }
+  Alert a = alerts.front();
+  xSemaphoreGive(alertLock);
+  bool ok = false;
+  if (meteredHttp.connect("ntfy.sh", 80)) {
+    String req = String("POST /" NTFY_TOPIC " HTTP/1.1\r\nHost: ntfy.sh\r\nTitle: ") + a.title +
+                 "\r\nPriority: " + a.prio + (a.tags.length() ? "\r\nTags: " + a.tags : String()) +
+                 "\r\nContent-Length: " + a.body.length() + "\r\nConnection: close\r\n\r\n" + a.body;
+    meteredHttp.write((const uint8_t *)req.c_str(), req.length());
+    String status;
+    for (uint32_t t = millis(); millis() - t < 15000 && status.length() < 12;) {
+      if (meteredHttp.available()) status += (char)meteredHttp.read();
+      else delay(20);
+    }
+    ok = status.startsWith("HTTP/1.1 200");
+    meteredHttp.stop();
+  }
+  static uint8_t tries = 0;
+  if (ok || ++tries >= 3) {
+    if (!ok) Serial.println("[alert] gave up on one");
+    tries = 0;
+    xSemaphoreTake(alertLock, portMAX_DELAY);
+    if (!alerts.empty()) alerts.pop_front();
+    xSemaphoreGive(alertLock);
+    if (ok) linkCount(U_ALERT);
+  }
+#endif
+}
 
 // ---- modem ---------------------------------------------------------------
 static bool modemAlive() {
@@ -433,6 +500,11 @@ static void linkTask(void *) {
     }
 
     mqtt.loop();
+    static uint32_t lastAlertTry = 0;
+    if (millis() - lastAlertTry > 10000) {
+      lastAlertTry = millis();
+      sendAlert();
+    }
     // The modem's TCP keep-alive probes are invisible to us: count a probe
     // and its ACK (~104 B) for every keep-alive period with no traffic.
     if (millis() - lastTrafficMs >= TCP_KEEPIDLE_MIN * 60000UL) meterAdd(104, &DayUse::ka);
@@ -467,6 +539,7 @@ void linkBegin(const std::vector<String> &subscribeTopics) {
   outQ = xQueueCreate(8, sizeof(Msg *));
   inQ = xQueueCreate(8, sizeof(Msg *));
   infoLock = xSemaphoreCreateMutex();
+  if (!alertLock) alertLock = xSemaphoreCreateMutex();
   store.begin("data");
   meterDay = store.getUInt("day");
   meterMonth = store.getUInt("mon");
@@ -476,6 +549,9 @@ void linkBegin(const std::vector<String> &subscribeTopics) {
   if (store.getBytesLength("use") == sizeof info.use) store.getBytes("use", &info.use, sizeof info.use);
   info.extraDay = store.getUInt("xday");
   extraMonth = store.getUInt("xmon");
+  info.prevDay = store.getUInt("pday");
+  info.prevBytes = store.getUInt("pbytes");
+  if (store.getBytesLength("puse") == sizeof info.prevUse) store.getBytes("puse", &info.prevUse, sizeof info.prevUse);
   limitsLocked();
   // Idle priority: TinyGSM busy-waits (up to 75 s on a socket open) and would
   // otherwise starve IDLE0 and trip the task watchdog.

@@ -12,9 +12,15 @@ on plugctl/<tid>/hr, sealed with that owner's history key (HISTORY_KEYS, a JSON
 object {tid: hex key}, written by tools/make_secrets.py to
 secrets/history_keys.json).
 
-Usage: HISTORY_KEYS='{...}' tools/collect_history.py <dir> [--topic-prefix plugctl]
+It also watches the controller's retained status messages (still sealed: it
+only notes when they change). If none has changed in SILENT_AFTER, the
+controller is offline (power, signal or its data limit), which it cannot tell
+anyone itself, so this sends an ntfy alert to NTFY_TOPIC, and another when it
+is back.
+
+Usage: HISTORY_KEYS='{...}' [NTFY_TOPIC=...] tools/collect_history.py <dir> [--topic-prefix plugctl]
 """
-import argparse, base64, json, os, secrets, ssl, sys, time
+import argparse, base64, hashlib, json, os, secrets, ssl, sys, time, urllib.request
 from datetime import datetime, timezone
 
 import paho.mqtt.client as mqtt
@@ -24,6 +30,7 @@ BROKER, PORT = "broker.hivemq.com", 8883
 MAX_GAP = 200      # a bigger jump in seq means the controller was reset, not data loss
 MAX_TRIES = 6      # hourly resend requests per missing batch before giving up
 MAX_REQUEST = 40   # seqs per request
+SILENT_AFTER = 7 * 3600  # the controller reports at least every 6 h
 
 
 def ranges_add(rs, n):
@@ -49,6 +56,7 @@ def collect(prefix, tids, wait_s=6, max_s=40):
     def on_connect(c, _u, _f, rc, _p):
         for tid in tids:
             c.subscribe(f"{prefix}/{tid}/h/+", qos=1)
+            c.subscribe(f"{prefix}/{tid}/s", qos=1)
 
     def on_message(_c, _u, m):
         last[0] = time.time()
@@ -64,6 +72,38 @@ def collect(prefix, tids, wait_s=6, max_s=40):
     while time.time() - last[0] < wait_s and time.time() - t0 < max_s:
         time.sleep(0.5)
     return c, got
+
+
+def notify(title, body, prio=4, tags="warning"):
+    topic = os.environ.get("NTFY_TOPIC")
+    if not topic:
+        return
+    req = urllib.request.Request(f"https://ntfy.sh/{topic}", data=body.encode(), method="POST",
+                                 headers={"Title": title, "Priority": str(prio), "Tags": tags})
+    try:
+        urllib.request.urlopen(req, timeout=15).read()
+    except Exception as e:
+        print("ntfy failed:", e)
+
+
+def watch_controller(d, got, now):
+    sp = os.path.join(d, "controller.json")
+    st = json.load(open(sp)) if os.path.exists(sp) else {}
+    status = sorted((t, p) for t, p in got.items() if t.endswith("/s"))
+    if status:  # nothing retained at all: the broker dropped it, learn nothing
+        h = hashlib.sha256(b"".join(t.encode() + p for t, p in status)).hexdigest()
+        if h != st.get("hash"):
+            if st.get("alerted"):
+                notify("Controller is back", "It's reporting again.", 3, "white_check_mark")
+            st.update(hash=h, changed=now, alerted=False)
+    changed = st.setdefault("changed", now)
+    if not st.get("alerted") and now - changed > SILENT_AFTER:
+        hrs = (now - changed) // 3600
+        notify("Controller offline", f"No report for {hrs} h: power, cell signal or its data limit. "
+               "Plug timers and schedules keep running on the controller if it has power.")
+        st["alerted"] = True
+    with open(sp, "w") as f:
+        json.dump(st, f, separators=(",", ":"))
 
 
 def main():
@@ -87,7 +127,7 @@ def main():
         new = []
         for topic, payload in got.items():
             parts = topic.split("/")
-            if parts[1] != tid or not parts[-1].isdigit():
+            if parts[1] != tid or parts[-2] != "h" or not parts[-1].isdigit():
                 continue
             pubs.append(c.publish(topic, b"", qos=1, retain=True))  # filed: clear it
             q = int(parts[-1])
@@ -126,6 +166,7 @@ def main():
             json.dump(st, f, separators=(",", ":"))
         print(f"{tid}: {len(new)} new batches, {len(ask)} resend requested, {len(st['lost'])} lost")
 
+    watch_controller(a.dir, got, now)
     for p in pubs:
         p.wait_for_publish(10)
     c.loop_stop()

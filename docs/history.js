@@ -12,6 +12,7 @@ const WINDOWS = [[86400, 'Whole day'], [6 * 3600, '6 h'], [3600, '1 h'], [900, '
 
 const hist = {
   batches: new Map(),   // seq -> decoded batch
+  usage: new Map(),     // YYYYMMDD (UTC) -> the controller's data use that day
   months: new Map(),    // 'YYYY-MM' -> Promise (loaded once per page view)
   mac: null, day: 0, win: 86400, from: 0,
 };
@@ -38,8 +39,30 @@ function decodeBatch(b) {
 }
 
 function histAdd(msg) {
-  if (msg && msg.q && msg.p) hist.batches.set(msg.q, decodeBatch(msg));
+  if (msg && msg.u) hist.usage.set(msg.u, msg);   // daily data-use summary (firmware 1.2+)
+  else if (msg && msg.q && msg.p) hist.batches.set(msg.q, decodeBatch(msg));
 }
+
+// ---- controller data use, past days --------------------------------------------
+const ymUTC = (d) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+async function showUsage() {
+  const el = $('usageDays');
+  el.innerHTML = '<p class="muted small">Loading…</p>';
+  const now = new Date();
+  await Promise.all([ymUTC(now), ymUTC(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)))].map(loadMonth));
+  const days = [...hist.usage.values()].sort((a, b) => b.u - a.u).slice(0, 45);
+  if (!days.length) { el.innerHTML = '<p class="muted small">No days filed yet (needs firmware 1.2; the first one arrives after the next day reset).</p>'; return; }
+  const label = (u) => new Date(Date.UTC(Math.floor(u / 10000), Math.floor(u / 100) % 100 - 1, u % 100)).toLocaleDateString([], { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const rows = days.map((d) => {
+    const [conn, tx, rx, pkt, ka] = d.ub || [];
+    const [sess, fresh] = d.us || [];
+    return `<tr><td>${label(d.u)}</td><td><b>${kb(d.d)}</b></td><td>${kb(ka || 0)}</td><td>${kb(conn || 0)} <span class="muted">(${sess || 0}${fresh ? `, ${fresh} fresh` : ''})</span></td>
+      <td>${kb(tx || 0)}</td><td>${kb(rx || 0)}</td><td>${kb(pkt || 0)}</td><td class="small">${usageMsgs(d.un).join(', ') || '–'}</td></tr>`;
+  }).join('');
+  el.innerHTML = `<div class="scroll"><table class="usage"><thead><tr><th>Day</th><th>Total</th><th>Keep-alive</th><th>Connecting (sessions)</th><th>Sent</th><th>Received</th><th>Overhead</th><th>Messages</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="muted small">Estimated. Days run midnight to midnight UTC (${fmtClock(dayResetS())} here).</p>`;
+}
+
 
 async function loadMonth(ym) {
   if (!hist.months.has(ym)) {

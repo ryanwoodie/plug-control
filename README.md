@@ -76,6 +76,55 @@ A new firmware is on trial until it has run 2 minutes with the cell link up
 starts the previous firmware again by itself. The page also has a button to
 switch back to the previous firmware.
 
+## Updating over a phone hotspot (staged updates)
+
+From firmware 1.2 the controller can fetch an update itself, with no laptop
+and no SIM data:
+
+1. Put your hotspot(s) in `secrets/hotspots.json` (git-ignored):
+   `[["My iPhone", "hotspot-password"]]`.
+2. Run `tools/publish_fw.py`. It builds, encrypts the build with `FW_KEY`
+   (so the owner keys inside stay private), commits it to `docs/fw/`, waits
+   for GitHub Pages to serve it, then flags it on the broker (a sealed,
+   retained message with the version, URL and hotspot list).
+3. The controller gets the flag over the cell link (a few hundred bytes) and
+   only then starts scanning for the hotspot, every 2 minutes. The app's
+   device panel says an update is waiting and which hotspot it wants.
+4. Turn the hotspot on near the controller. It joins, downloads (~1 MB of the
+   phone's data), checks the AES-GCM tag (anything that isn't our build is
+   refused), installs and restarts. Plugs drop off its Wi-Fi for a minute or
+   two because its Wi-Fi follows the hotspot's channel; their own timers keep
+   running.
+
+The new firmware is on trial as above. If it rolls back, the controller won't
+try that version again and sends an alert. `--notice-only` re-sends the flag
+(e.g. after editing hotspots) and `--clear` withdraws it.
+
+## Alerts (ntfy)
+
+Subscribe to the topic in `secrets/credentials.txt` in the ntfy app (server
+ntfy.sh). The controller sends (plain HTTP, ~1.5 KB each):
+
+- a plug on for 12 hours straight, and every 12 hours after
+- a plug not answering for 30 minutes, and when it's back
+- a plug that lost power (a Kasa is switched off when it comes back)
+- a command a plug didn't take
+- data saver on, data limit reached
+- controller started (power up), crashed or hung, firmware changed or an
+  update failed
+
+The hourly GitHub Action adds "Controller offline" when no status has changed
+for 7 hours (the controller can't say that itself), and "back" afterwards. It
+needs the `NTFY_TOPIC` Actions secret.
+
+The app also shows each owner the other plugs' on/off state, as a hint.
+
+## Data use history
+
+Each finished day (UTC) the controller files its data use by kind into the
+plug history feed (one small batch per owner). The device panel's "Data use,
+past days" lists them.
+
 ## Expected data use
 
 The 1NCE path drops idle TCP connections after 5.5–6 minutes (measured:
@@ -174,11 +223,14 @@ and the same for `tools/test_sched.cpp` (rotation timing).
   - `src/histlog.h`, `src/history.cpp`: plug history change log and batches
   - `src/sched.h`: rotation timing
   - `src/fwupdate.cpp`: firmware update page and trial/rollback
+  - `src/fwfetch.cpp`: staged updates over a phone hotspot
   - `src/crypto.cpp`: AES-GCM message sealing
   - `lib/`: LilyGo's TinyGSM fork and PubSubClient
 - `docs/`: the web app (served by GitHub Pages)
 - `tools/make_secrets.py`: key and password generator
 - `tools/collect_history.py`: the history collector run by the GitHub Action
+  (also sends the "controller offline" alert)
+- `tools/publish_fw.py`: stage a firmware update for the hotspot updater
 
 ## Changing the broker
 

@@ -31,6 +31,7 @@ jobs:
       - run: python tools/collect_history.py data/history
         env:
           HISTORY_KEYS: ${{ secrets.HISTORY_KEYS }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
       - name: Commit
         working-directory: data
         run: |

@@ -365,6 +365,14 @@ function render() {
   renderDevice();
 }
 
+// The other owners' plugs, as a hint (firmware 1.2+): [name, reachable, on, rotating].
+function otherPlugs() {
+  const op = status?.op || [];
+  if (!op.length) return '';
+  const st = ([, ok, on, rot]) => (!ok ? 'not seen' : rot ? 'rotating' : on ? '<b>on</b>' : 'off');
+  return `<p class="muted small other">${op.map((o) => `${esc(o[0])}: ${st(o)}`).join(' · ')}</p>`;
+}
+
 function plugCard(mac, s, pc) {
   const pend = pendingFor(mac);
   const stateCls = !s.ok ? 'unknown' : s.on ? 'on' : 'off';
@@ -406,6 +414,7 @@ function plugCard(mac, s, pc) {
       <span class="dot"></span><span class="big">${stateTxt}</span> ${timer}
     </div>
     ${via}
+    ${otherPlugs()}
     ${s.ok && s.w !== undefined ? `<p class="meter"><span>${(s.w ?? 0).toFixed(1)} W</span><span>${s.v ?? '–'} V</span><span>${(s.kwh ?? 0).toFixed(3)} kWh total</span></p>` : ''}
     ${pendTxt}
     <div class="actions">
@@ -434,7 +443,7 @@ function renderDevice() {
     ['SIM data (est.)', `today ${kb(n.d || 0)} · this month ${kb(n.m || 0)} · all time ${kb(n.tot || 0)}${n.cap ? ' · <b>limit reached, paused</b>' : n.sv ? ' · <b>data saver on</b>' : ''}`],
     ['Clock', status.ts || 'none'],
     ['Settings', pendingCfg ? 'saving… (waiting for controller)' : config ? 'up to date' : 'defaults'],
-    ['Firmware', `${esc(status.fw)} · up ${Math.floor(status.up / 3600)} h`],
+    ['Firmware', `${esc(status.fw)} · up ${Math.floor(status.up / 3600)} h${status.fwq ? `<br><b>Update ${esc(status.fwq.v)} waiting</b>: turn on your hotspot (${esc(status.fwq.h || 'none listed')}) near the controller. It looks every 2 minutes, installs in about 2 minutes and restarts; plugs drop off briefly.${status.fwq.e ? ` Last try: ${esc(status.fwq.e)}.` : ''}` : ''}`],
   ];
   if (n.lim) rows.push(['Data limits', `today: saver at ${kb(n.lim[0])}, stop at ${kb(n.lim[1])}${n.x ? ` (incl. ${kb(n.x)} extra you allowed)` : ''} · month: saver at ${kb(n.lim[2])}, stop at ${kb(n.lim[3])} · the day resets at ${fmtClock(dayResetS())}`]);
   if (n.ub) rows.push(['Data today by kind', usageBreakdown(n)]);
@@ -488,18 +497,19 @@ function renderDataState() {
   if (b) b.onclick = () => sendCmd('more', '', { k: MORE_KB });
 }
 
+// Message counts by reason, in firmware's Usage order.
+const USAGE_KINDS = ['refresh', 'command', 'power follow-up', 'plug Wi-Fi', 'heartbeat', 'history', 'held back', 'other plug', 'alert'];
+const usageMsgs = (un) => (un || []).map((c, i) => (c ? `${c} ${USAGE_KINDS[i] || '?'}` : '')).filter(Boolean);
+
 // Firmware 1.2+: what today's data went on (UTC day, resets 6 PM local).
 function usageBreakdown(n) {
   const [conn, tx, rx, pkt, ka] = n.ub;
   const [sess, fresh] = n.us || [0, 0];
-  const [ref, cmd, fol, plug, beat, hist, held] = n.un || [];
   const parts = [
     `connecting ${kb(conn)} (${sess} session${sess === 1 ? '' : 's'}${fresh ? `, ${fresh} fresh` : ''})`,
     `sent ${kb(tx)}`, `received ${kb(rx)}`, `packet overhead ${kb(pkt)}`, `keep-alive ${kb(ka)}`,
   ];
-  const msgs = [[ref, 'refresh'], [cmd, 'command'], [fol, 'power follow-up'], [plug, 'plug Wi-Fi'],
-    [beat, 'heartbeat'], [hist, 'history'], [held, 'held back']]
-    .filter(([c]) => c).map(([c, l]) => `${c} ${l}`);
+  const msgs = usageMsgs(n.un);
   return parts.join(' · ') + (msgs.length ? `<br>messages: ${msgs.join(', ')}` : '');
 }
 
@@ -665,6 +675,7 @@ $('logout').addEventListener('click', () => {
   try { localStorage.removeItem('plugctl'); } catch {}
   location.reload();
 });
+$('usageBox').addEventListener('toggle', (e) => { if (e.target.open) showUsage(); });
 $('refresh').addEventListener('click', () => {
   if (status?.net?.cap || status?.net?.sv) setBanner(`Data saver is on, so the controller won’t answer refreshes until ${fmtClock(dayResetS())} unless you allow more data. On, Off and timers still work.`, 'warn');
   refresh();

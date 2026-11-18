@@ -27,6 +27,8 @@ static Preferences store;
 // The modem cannot report billed bytes, so we estimate: payload bytes plus
 // ~52 B per IP packet and its ACK, and a fixed cost per TCP connection.
 static uint32_t meterDay = 0, meterMonth = 0, lastMeterSave = 0;
+// Site time minus UTC, from the site time zone (linkSetUtcOffset); default CST6.
+static volatile int32_t utcOffset = -6 * 3600;
 // Breakdown since boot, for the serial log.
 static uint32_t dbgConn, dbgTx, dbgRx, dbgOvh, dbgReconnects, dbgPub, dbgRecv;
 
@@ -77,8 +79,10 @@ static void meterSave() {
 static void meterRoll() {
   time_t now = time(nullptr);
   if (now < 1700000000) return;  // no clock yet
+  // The site's local day and month (gmtime of a shifted time: no TZ needed in this task).
+  time_t local = now + utcOffset;
   struct tm t;
-  gmtime_r(&now, &t);
+  gmtime_r(&local, &t);
   uint32_t day = (t.tm_year + 1900) * 10000 + (t.tm_mon + 1) * 100 + t.tm_mday;
   uint32_t mon = day / 100;
   if (day != meterDay || mon != meterMonth) {
@@ -392,9 +396,9 @@ static void linkTask(void *) {
       checkUntil = 0;
       time_t now = time(nullptr);
       if (now > 1700000000) {
-        // Check-ins at the top of the UTC hour (every 6 h for the monthly
-        // cap), so the web app can say when the next one is.
-        uint32_t slot = info.capMonth ? now / 21600 : now / 3600;
+        // Check-ins at the top of the hour (every 6 h for the monthly cap,
+        // at local midnight, 6, noon and 6), so the web app can say when.
+        uint32_t slot = info.capMonth ? (now + utcOffset) / 21600 : now / 3600;
         if (!capSlot) capSlot = slot;
         if (slot != capSlot) {
           capSlot = slot;
@@ -580,3 +584,5 @@ LinkInfo linkInfo() {
   xSemaphoreGive(infoLock);
   return copy;
 }
+
+void linkSetUtcOffset(int32_t secs) { utcOffset = secs; }

@@ -18,7 +18,7 @@
 #include "secrets.h"
 #include "shelly.h"
 
-#define FW_VERSION "1.2"
+#define FW_VERSION "1.3"
 
 // on/off (minutes), both set: rotate within the window (see sched.h).
 struct Rule {
@@ -520,6 +520,22 @@ static String localHM(time_t t, uint8_t owner) {
   return b;
 }
 
+// The data meter's day and month follow the site's time zone (the first
+// owner's setting; all plugs are at one site). Rechecked every minute for DST.
+static void updateSiteOffset() {
+  static uint32_t last = 0;
+  time_t now = time(nullptr);
+  if ((last && millis() - last < 60000) || now < 1700000000) return;
+  last = millis();
+  setenv("TZ", owners[0].tz.c_str(), 1);
+  tzset();
+  struct tm lt, gt;
+  localtime_r(&now, &lt);
+  gmtime_r(&now, &gt);
+  int days = lt.tm_year != gt.tm_year ? (lt.tm_year < gt.tm_year ? -1 : 1) : lt.tm_yday - gt.tm_yday;
+  linkSetUtcOffset(days * 86400 + (lt.tm_hour - gt.tm_hour) * 3600 + (lt.tm_min - gt.tm_min) * 60);
+}
+
 static void checkAlerts() {
   static uint32_t last = 0;
   if (millis() - last < 30000) return;
@@ -776,6 +792,7 @@ void loop() {
   provisionMissing();
   reportStatus();
   histLoop();
+  updateSiteOffset();
   checkAlerts();
   fetchLoop();
   updateLoop();

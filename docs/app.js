@@ -464,15 +464,21 @@ function renderDevice() {
   $('tz').value = (config || baseConfig()).tz;
 }
 
-// The controller's data day runs on UTC: midnight UTC in local time.
+// When the controller's data day ends: local midnight (firmware 1.3+, the
+// site's time zone, taken to be this browser's); midnight UTC before that.
 function dayResetS() {
   const d = new Date();
-  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) / 1000;
+  if (status?.fw && !fwAtLeast('1.3')) return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) / 1000;
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1) / 1000;
 }
 // Own name: history.js has a fmtClock too, and app.js must work even if that file fails to load.
 const hhmm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-// Capped controllers check in at the top of each UTC hour (every 6 h for the monthly cap).
-const nextCheckIn = (every) => (Math.floor(nowS() / every) + 1) * every;
+// Capped controllers check in at the top of each hour; for the monthly cap every
+// 6 h from local midnight (firmware 1.3+; from midnight UTC before).
+const nextCheckIn = (every) => {
+  const off = status?.fw && !fwAtLeast('1.3') ? 0 : -new Date().getTimezoneOffset() * 60;
+  return (Math.floor((nowS() + off) / every) + 1) * every - off;
+};
 const pendingMore = () => (cmds.q || []).find((c) => c.a === 'more' && nowS() - c.t < MORE_MAX_AGE && !(status?.ax || []).includes(c.id));
 
 // The banner under the header: what the data guard is doing, and a way past it.
@@ -514,7 +520,7 @@ function renderDataState() {
 const USAGE_KINDS = ['refresh', 'command', 'power follow-up', 'plug Wi-Fi', 'heartbeat', 'history', 'held back', 'other plug', 'alert'];
 const usageMsgs = (un) => (un || []).map((c, i) => (c ? `${c} ${USAGE_KINDS[i] || '?'}` : '')).filter(Boolean);
 
-// Firmware 1.2+: what today's data went on (UTC day, resets 6 PM local).
+// Firmware 1.2+: what today's data went on (local day from 1.3, UTC before).
 function usageBreakdown(n) {
   const [conn, tx, rx, pkt, ka] = n.ub;
   const [sess, fresh] = n.us || [0, 0];

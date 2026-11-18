@@ -12,7 +12,7 @@ const WINDOWS = [[86400, 'Whole day'], [6 * 3600, '6 h'], [3600, '1 h'], [900, '
 
 const hist = {
   batches: new Map(),   // seq -> decoded batch
-  usage: new Map(),     // YYYYMMDD (UTC) -> the controller's data use that day
+  usage: new Map(),     // YYYYMMDD (local; UTC before firmware 1.3) -> the controller's data use that day
   months: new Map(),    // 'YYYY-MM' -> Promise (loaded once per page view)
   mac: null, day: 0, win: 86400, from: 0,
 };
@@ -60,7 +60,7 @@ async function showUsage() {
       <td>${kb(tx || 0)}</td><td>${kb(rx || 0)}</td><td>${kb(pkt || 0)}</td><td class="small">${usageMsgs(d.un).join(', ') || '–'}</td></tr>`;
   }).join('');
   el.innerHTML = `<div class="scroll"><table class="usage"><thead><tr><th>Day</th><th>Total</th><th>Keep-alive</th><th>Connecting (sessions)</th><th>Sent</th><th>Received</th><th>Overhead</th><th>Messages</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <p class="muted small">Estimated. Days run midnight to midnight UTC (${fmtClock(dayResetS())} here).</p>`;
+    <p class="muted small">Estimated. Days run midnight to midnight local time; days before firmware 1.3 ran on UTC (ending ${fmtClock(Date.UTC(2000, 0, 1) / 1000)} here).</p>`;
 }
 
 

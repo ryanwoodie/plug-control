@@ -19,6 +19,7 @@ enum Usage : uint8_t {
   U_COUNT
 };
 
+// Days and months are the site's local ones (linkSetUtcOffset).
 struct DayUse {
   uint32_t conn;  // TCP + MQTT connection setup
   uint32_t tx;    // bytes we sent (payload + MQTT headers)
@@ -40,9 +41,9 @@ struct LinkInfo {
   bool saving;   // past the data reserve: only essential messages go out
   // Current limits, including any extra the owners allowed (linkAllow).
   uint32_t dayReserve, dayCap, monthReserve, monthCap, extraDay;
-  DayUse use;    // today's breakdown (UTC day, like `today`)
+  DayUse use;    // today's breakdown (local day, like `today`)
   // The last finished day, kept until the next roll for the history feed.
-  uint32_t prevDay, prevBytes;  // YYYYMMDD (UTC), estimated bytes
+  uint32_t prevDay, prevBytes;  // YYYYMMDD (local), estimated bytes
   DayUse prevUse;
 };
 
@@ -54,6 +55,9 @@ void linkCount(Usage u);
 // Allow this many more bytes today (and this month) on top of the reserve
 // and cap; resets when the period rolls over.
 void linkAllow(uint32_t bytes);
+// The site's local time minus UTC, in seconds: where the data day and month
+// start. Set by the app from the site time zone.
+void linkSetUtcOffset(int32_t secs);
 // A push alert to the ntfy topic (NTFY_TOPIC in secrets.h), sent over plain
 // HTTP on the next chance the link is up (~1.5 KB each). prio 1-5.
 void linkNotify(const String &title, const String &body, uint8_t prio = 3, const char *tags = "");

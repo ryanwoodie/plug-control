@@ -27,10 +27,12 @@ Remote control for Shelly and TP-Link Kasa smart plugs over a 1NCE IoT SIM, buil
   power follow-ups and history wait, so On/Off and timers keep working. A plug
   that keeps dropping off Wi-Fi is reported at most every 20 minutes after 3
   reports in an hour, and more than 4 MQTT sessions in an hour spaces the next
-  one 15 minutes out. The day runs midnight to midnight UTC (6 PM in
-  Saskatchewan). The device panel shows what today's data went on.
+  one 15 minutes out. From firmware 1.3 the day and month run on the
+  site's local time (the first owner's time zone setting); 1.2 used UTC.
+  The device panel shows what today's data went on.
   Past the cap it sends one last report saying so, then checks in briefly at
-  the top of each UTC hour (every 6 h for the monthly cap, ~1 KB each). The
+  the top of each hour (every 6 h from local midnight for the monthly cap,
+  ~1 KB each). The
   web app explains the saver or cap and has an "Allow 50 KB more today"
   button, which raises both limits for the day (and the month's by the same)
   as soon as the controller sees it: at once in saver mode, at the next
@@ -121,7 +123,7 @@ The app also shows each owner the other plugs' on/off state, as a hint.
 
 ## Data use history
 
-Each finished day (UTC) the controller files its data use by kind into the
+Each finished day (local time) the controller files its data use by kind into the
 plug history feed (one small batch per owner). The device panel's "Data use,
 past days" lists them.
 

@@ -102,7 +102,7 @@ static void sendBatch(int i, uint32_t now) {
   l.begin(now);
 }
 
-// Once per finished (UTC) day: what the controller's data went on, as a
+// Once per finished (local) day: what the controller's data went on, as a
 // history batch of its own ({"u": day, ...}) so the collector files it with
 // the rest and the web app can show past days. Each owner gets a copy.
 static void usageSummary() {

@@ -38,7 +38,7 @@ struct Plug {
   String ip, name;
   std::vector<Rule> rules;
   std::vector<OneOff> ones;
-  uint16_t maxOn = 0;  // safety cap for manual "on", minutes (0 = none)
+  uint16_t maxOn = DEFAULT_MAX_ON_MIN;  // safety cap for manual "on", minutes
   bool reachable = false, everSeen = false, hardened = false, on = false;
   float watts = 0, volts = 0, wh = 0;
   uint8_t misses = 0;
@@ -119,7 +119,8 @@ static void loadConfig(uint8_t oi, const String &json, bool persist) {
     JsonObject c = doc["p"][p.def->mac];
     if (c.isNull()) continue;
     p.name = c["n"] | p.def->name;
-    p.maxOn = c["max"] | 0;
+    uint16_t mx = c["max"] | 0;
+    p.maxOn = mx ? mx : DEFAULT_MAX_ON_MIN;  // 0 (old "no limit") or unset: the default
     p.rules.clear();
     for (JsonObject r : c["r"].as<JsonArray>()) {
       if (!(r["e"] | 1)) continue;
@@ -680,7 +681,7 @@ static void setupWeb() {
     int i = web.arg("i").toInt();
     if (i >= 0 && i < PLUG_COUNT) {
       uint32_t m = web.arg("m").toInt();
-      setPlug(plugs[i], web.arg("on") == "1", m * 60, m ? 't' : 'm');
+      setPlug(plugs[i], web.arg("on") == "1", (m ? m : plugs[i].maxOn) * 60, m ? 't' : 'm');
     }
     web.sendHeader("Location", "/");
     web.send(303);

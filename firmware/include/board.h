@@ -38,6 +38,9 @@
 // More MQTT sessions than this in an hour and the next waits 15 minutes:
 // each fresh session re-downloads the retained settings (~2-4 KB).
 #define SESSIONS_PER_HOUR 4
+// Manual "On" always switches off by itself: this long unless the owner
+// picks another limit in the app (there is no "no limit").
+#define DEFAULT_MAX_ON_MIN 480
 #define CMD_MAX_AGE_S 900                  // ignore manual commands older than this
 
 #define PLUG_IP_BASE 200  // plug n gets 192.168.4.(200+n)

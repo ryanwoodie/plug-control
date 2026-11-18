@@ -215,6 +215,9 @@ function durOptions(sel, mins, value) {
   sel.innerHTML = mins.map((m) => `<option value="${m}">${fmtDur(m)}</option>`).join('');
   sel.value = String(value);
 }
+// Manual "On" always has an auto-off (firmware DEFAULT_MAX_ON_MIN); no "no limit".
+const DEFAULT_MAX_ON = 480;
+const MAX_ON_CHOICES = [30, 60, 120, 180, 240, 360, 480, 600, 720, 960, 1440];
 const DURS = [15, 30, 45, 60, 90, 120, 150, 180, 240, 300, 360, 480, 600, 720];
 const RUN_DURS = [...DURS, 900, 1080, 1440];
 const CYCLE_DURS = [1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240];
@@ -428,6 +431,7 @@ function plugCard(mac, s, pc) {
       <button class="${isOff ? 'sel-off' : ''}" aria-pressed="${isOff}" data-act="off" data-mac="${mac}">Off</button>
       <button data-act="timer" data-mac="${mac}">Timer…</button>
     </div>
+    <p class="muted small">On switches off by itself after ${fmtDur(pc.max || DEFAULT_MAX_ON)} (change in Settings).</p>
     <h3>Schedules</h3>
     ${rules ? `<ul class="list">${rules}</ul>` : '<p class="muted small">No repeating schedules.</p>'}
     ${ones ? `<h3>One-time</h3><ul class="list">${ones}</ul>` : ''}
@@ -614,8 +618,7 @@ async function plugSettings(mac) {
   const cfg = baseConfig();
   const pc = plugCfg(cfg, mac);
   $('plugName').value = pc.n || '';
-  durOptions($('plugMax'), [0, 30, 60, 120, 180, 240, 360, 480, 720], pc.max || 0);
-  $('plugMax').options[0].textContent = 'No limit';
+  durOptions($('plugMax'), MAX_ON_CHOICES, pc.max || DEFAULT_MAX_ON);
   if (await ask($('plugDlg')) !== 'save') return;
   pc.n = $('plugName').value.trim() || pc.n;
   pc.max = +$('plugMax').value;

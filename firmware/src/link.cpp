@@ -182,18 +182,20 @@ static void sendAlert() {
   }
   Alert a = alerts.front();
   xSemaphoreGive(alertLock);
+  // Delivered once the request is written: waiting for "200" and retrying
+  // on a slow reply sent the same alert twice.
   bool ok = false;
   if (meteredHttp.connect("ntfy.sh", 80)) {
     String req = String("POST /" NTFY_TOPIC " HTTP/1.1\r\nHost: ntfy.sh\r\nTitle: ") + a.title +
                  "\r\nPriority: " + a.prio + (a.tags.length() ? "\r\nTags: " + a.tags : String()) +
                  "\r\nContent-Length: " + a.body.length() + "\r\nConnection: close\r\n\r\n" + a.body;
-    meteredHttp.write((const uint8_t *)req.c_str(), req.length());
+    ok = meteredHttp.write((const uint8_t *)req.c_str(), req.length()) == req.length();
     String status;
-    for (uint32_t t = millis(); millis() - t < 15000 && status.length() < 12;) {
+    for (uint32_t t = millis(); millis() - t < 8000 && status.length() < 12;) {
       if (meteredHttp.available()) status += (char)meteredHttp.read();
       else delay(20);
     }
-    ok = status.startsWith("HTTP/1.1 200");
+    Serial.printf("[alert] sent (%s)\n", status.length() ? status.c_str() : "no reply yet");
     meteredHttp.stop();
   }
   static uint8_t tries = 0;

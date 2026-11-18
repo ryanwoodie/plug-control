@@ -362,7 +362,13 @@ function render() {
   } else {
     plugsEl.innerHTML = macs.map((mac) => plugCard(mac, status?.p?.[mac] || {}, cfg.p?.[mac] || { r: [], o: [] })).join('');
   }
-  renderDevice();
+  try {
+    renderDevice();
+  } catch (e) {
+    // Show it instead of leaving a half-drawn page.
+    $('devInfo').innerHTML = `<dt>Display error</dt><dd>${esc(String(e))}. Try reloading the page.</dd>`;
+    console.error(e);
+  }
 }
 
 // The other owners' plugs, as a hint (firmware 1.2+): [name, reachable, on, rotating].
@@ -445,7 +451,7 @@ function renderDevice() {
     ['Settings', pendingCfg ? 'saving… (waiting for controller)' : config ? 'up to date' : 'defaults'],
     ['Firmware', `${esc(status.fw)} · up ${Math.floor(status.up / 3600)} h${status.fwq ? `<br><b>Update ${esc(status.fwq.v)} waiting</b>: turn on your hotspot (${esc(status.fwq.h || 'none listed')}) near the controller. It looks every 2 minutes, installs in about 2 minutes and restarts; plugs drop off briefly.${status.fwq.e ? ` Last try: ${esc(status.fwq.e)}.` : ''}` : ''}`],
   ];
-  if (n.lim) rows.push(['Data limits', `today: saver at ${kb(n.lim[0])}, stop at ${kb(n.lim[1])}${n.x ? ` (incl. ${kb(n.x)} extra you allowed)` : ''} · month: saver at ${kb(n.lim[2])}, stop at ${kb(n.lim[3])} · the day resets at ${fmtClock(dayResetS())}`]);
+  if (n.lim) rows.push(['Data limits', `today: saver at ${kb(n.lim[0])}, stop at ${kb(n.lim[1])}${n.x ? ` (incl. ${kb(n.x)} extra you allowed)` : ''} · month: saver at ${kb(n.lim[2])}, stop at ${kb(n.lim[3])} · the day resets at ${hhmm(dayResetS())}`]);
   if (n.ub) rows.push(['Data today by kind', usageBreakdown(n)]);
   if (status.gps) rows.push(['Location', `<a href="https://maps.google.com/?q=${status.gps[0]},${status.gps[1]}" target="_blank" rel="noopener">${status.gps[0]}, ${status.gps[1]}</a>`]);
   d.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
@@ -457,7 +463,8 @@ function dayResetS() {
   const d = new Date();
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) / 1000;
 }
-// fmtClock(t) is in history.js.
+// Own name: history.js has a fmtClock too, and app.js must work even if that file fails to load.
+const hhmm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 // Capped controllers check in at the top of each UTC hour (every 6 h for the monthly cap).
 const nextCheckIn = (every) => (Math.floor(nowS() / every) + 1) * every;
 const pendingMore = () => (cmds.q || []).find((c) => c.a === 'more' && nowS() - c.t < MORE_MAX_AGE && !(status?.ax || []).includes(c.id));
@@ -467,12 +474,12 @@ function renderDataState() {
   const el = $('offline');
   const n = status?.net || {};
   const silent = status && nowS() - status.t > OFFLINE_AFTER;
-  const reset = fmtClock(dayResetS());
+  const reset = hhmm(dayResetS());
   let html = '';
   let more = false;
   if (status && n.cap) {
     const month = n.cap === 2;
-    const next = fmtClock(nextCheckIn(month ? 21600 : 3600));
+    const next = hhmm(nextCheckIn(month ? 21600 : 3600));
     html = month
       ? `<b>Monthly data limit reached</b> (${kb(n.m || 0)}). The controller is offline until the 1st, except a short check-in every 6 hours (next about ${next}).`
       : `<b>Daily data limit reached</b> (${kb(n.d || 0)}). The controller is offline until ${reset}, except a short check-in at the top of each hour (next about ${next}).`;
@@ -488,7 +495,7 @@ function renderDataState() {
   if (more && status?.fw && fwAtLeast('1.2')) {
     const p = pendingMore();
     html += p
-      ? `<br>Asked for ${MORE_KB} KB more at ${fmtClock(p.t)}; ${n.cap ? 'it takes effect at the next check-in' : 'waiting for the controller'}.`
+      ? `<br>Asked for ${MORE_KB} KB more at ${hhmm(p.t)}; ${n.cap ? 'it takes effect at the next check-in' : 'waiting for the controller'}.`
       : `<br><button id="allowMore" class="small">Allow ${MORE_KB} KB more today</button>`;
   }
   el.hidden = !html;
@@ -650,8 +657,8 @@ async function start(s) {
   $('app').hidden = false;
   $('who').hidden = false;
   $('whoName').textContent = s.user.toUpperCase();
+  connect();  // first, so a rendering problem can't stop the data coming in
   render();
-  connect();
 }
 
 $('loginForm').addEventListener('submit', async (e) => {
@@ -677,7 +684,7 @@ $('logout').addEventListener('click', () => {
 });
 $('usageBox').addEventListener('toggle', (e) => { if (e.target.open) showUsage(); });
 $('refresh').addEventListener('click', () => {
-  if (status?.net?.cap || status?.net?.sv) setBanner(`Data saver is on, so the controller won’t answer refreshes until ${fmtClock(dayResetS())} unless you allow more data. On, Off and timers still work.`, 'warn');
+  if (status?.net?.cap || status?.net?.sv) setBanner(`Data saver is on, so the controller won’t answer refreshes until ${hhmm(dayResetS())} unless you allow more data. On, Off and timers still work.`, 'warn');
   refresh();
 });
 $('tz').innerHTML = TIMEZONES.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
